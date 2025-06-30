@@ -434,6 +434,8 @@ class TelemetryGenerator:
             start_time_ns=time.time_ns(),
             error_source=error_source,
             trigger_kind="SPAN_KIND_SERVER",
+            visited_services=set(),
+            recursion_depth=0
         )
 
         return spans_by_service
@@ -447,14 +449,23 @@ class TelemetryGenerator:
         start_time_ns: int,
         error_source: str | None,
         trigger_kind: str,
+        visited_services: set,
+        recursion_depth: int
     ) -> Tuple[int, bool]:
         """
         Recursively generates spans for a service and its dependencies.
         Returns a tuple of (end_time_nanoseconds, did_error_occur).
         """
+        if service_name in visited_services or recursion_depth > 20:
+            return start_time_ns, False
+
         service = self.services_map.get(service_name)
         if not service:
             return start_time_ns, False
+
+        # Add current service to the visited set for this path
+        current_path_visited = visited_services.copy()
+        current_path_visited.add(service_name)
 
         span_id = self._generate_id(8)
         
@@ -493,6 +504,8 @@ class TelemetryGenerator:
                         start_time_ns=consumer_start_time,
                         error_source=error_source,
                         trigger_kind="SPAN_KIND_CONSUMER",
+                        visited_services=current_path_visited,
+                        recursion_depth=recursion_depth + 1
                     )
                     if error_in_branch:
                         downstream_error = True
@@ -508,6 +521,8 @@ class TelemetryGenerator:
                         start_time_ns=downstream_start_time,
                         error_source=error_source,
                         trigger_kind="SPAN_KIND_SERVER",
+                        visited_services=current_path_visited,
+                        recursion_depth=recursion_depth + 1
                     )
                     if error_in_branch:
                         downstream_error = True
