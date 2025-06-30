@@ -9,7 +9,7 @@ import httpx
 import yaml
 from typing import Dict, List, Any, Tuple, Union, Optional
 
-from config_schema import ScenarioConfig, Service, ServiceDependency, DbDependency, CacheDependency
+from config_schema import ScenarioConfig, Service, ServiceDependency, DbDependency, CacheDependency, LatencyConfig, Operation
 
 
 class TelemetryGenerator:
@@ -66,6 +66,10 @@ class TelemetryGenerator:
         # Pre-generate resource attributes for each service
         self.service_resource_attributes = {
             s.name: self._generate_resource_attributes(s) for s in self.config.services
+        }
+        self.service_operations_map = {
+            s.name: {op.name: op for op in s.operations} 
+            for s in self.config.services if s.operations
         }
 
         # OTel Collector Endpoint
@@ -238,6 +242,12 @@ class TelemetryGenerator:
         # Fallback: if all services are dependencies (e.g., a cycle),
         # return the first service in the list.
         return self.config.services[0]
+
+    def _get_latency_ns(self, latency_config: Optional['LatencyConfig']) -> int:
+        """Calculates a latency in nanoseconds based on a LatencyConfig."""
+        if latency_config and random.random() < latency_config.probability:
+            return random.randint(latency_config.min_ms, latency_config.max_ms) * 1_000_000
+        return 0
 
     def format_otlp_trace_payload(self, spans_by_service: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Any]]:
         """
@@ -426,6 +436,11 @@ class TelemetryGenerator:
         # If an error occurs, pick a random service to be the initial point of failure.
         error_source = secrets.choice(self.config.services).name if trace_has_error else None
         
+        # --- Select a specific operation if available ---
+        operation = None
+        if entry_point.name in self.service_operations_map and self.service_operations_map[entry_point.name]:
+            operation = secrets.choice(list(self.service_operations_map[entry_point.name].values()))
+
         self._generate_span_recursive(
             service_name=entry_point.name,
             parent_span_id=None,
@@ -435,7 +450,8 @@ class TelemetryGenerator:
             error_source=error_source,
             trigger_kind="SPAN_KIND_SERVER",
             visited_services=set(),
-            recursion_depth=0
+            recursion_depth=0,
+            operation=operation
         )
 
         return spans_by_service
@@ -450,7 +466,8 @@ class TelemetryGenerator:
         error_source: str | None,
         trigger_kind: str,
         visited_services: set,
-        recursion_depth: int
+        recursion_depth: int,
+        operation: Optional[Operation] = None
     ) -> Tuple[int, bool]:
         """
         Recursively generates spans for a service and its dependencies.
@@ -469,13 +486,21 @@ class TelemetryGenerator:
 
         span_id = self._generate_id(8)
         
+        # --- Latency Calculation ---
+        # Start with a base processing time
         own_processing_time_ns = secrets.randbelow(20_000_000) + 5_000_000
+        # Add latency from the operation, if defined
+        if operation and operation.latency:
+            own_processing_time_ns += self._get_latency_ns(operation.latency)
+
+        # Determine the span name
+        span_name = operation.span_name if operation else f"{service.name} {trigger_kind.split('_')[-1].lower()}"
         
         service_span = {
             "traceId": trace_id,
             "spanId": span_id,
             "parentSpanId": parent_span_id,
-            "name": f"{service.name} {trigger_kind.split('_')[-1].lower()}",
+            "name": span_name,
             "kind": trigger_kind,
             "startTimeUnixNano": str(start_time_ns),
             "attributes": {},
@@ -505,7 +530,8 @@ class TelemetryGenerator:
                         error_source=error_source,
                         trigger_kind="SPAN_KIND_CONSUMER",
                         visited_services=current_path_visited,
-                        recursion_depth=recursion_depth + 1
+                        recursion_depth=recursion_depth + 1,
+                        operation=None # Operations don't propagate through queues
                     )
                     if error_in_branch:
                         downstream_error = True
@@ -522,7 +548,8 @@ class TelemetryGenerator:
                         error_source=error_source,
                         trigger_kind="SPAN_KIND_SERVER",
                         visited_services=current_path_visited,
-                        recursion_depth=recursion_depth + 1
+                        recursion_depth=recursion_depth + 1,
+                        operation=operation # Propagate operation context
                     )
                     if error_in_branch:
                         downstream_error = True
@@ -532,10 +559,11 @@ class TelemetryGenerator:
                         elif client_span.get("attributes", {}).get("rpc.system"):
                              client_span["attributes"]["rpc.grpc.status_code"] = 13
                     
+                    client_span["endTimeUnixNano"] = str(end_time) # Update client span end time
                     spans_by_service[service.name].append(client_span)
                     latest_child_end_time_ns = max(latest_child_end_time_ns, end_time)
             elif isinstance(dep, (DbDependency, CacheDependency)):
-                db_span, db_end_time = self._create_db_span(service, dep, trace_id, span_id, child_span_id, child_start_time_ns)
+                db_span, db_end_time = self._create_db_span(service, dep, trace_id, span_id, child_span_id, child_start_time_ns, operation)
                 spans_by_service[service.name].append(db_span)
                 latest_child_end_time_ns = max(latest_child_end_time_ns, db_end_time)
 
@@ -571,9 +599,15 @@ class TelemetryGenerator:
         }
 
     def _create_client_span(self, service: Service, dep: ServiceDependency, trace_id, parent_id, child_id, start_time):
-        duration = secrets.randbelow(80_000_000) + 20_000_000
-        end_time = start_time + duration
-        downstream_start_time = start_time + (secrets.randbelow(2_000_000) + 500_000)
+        # Base duration is now just for the network hop, as recursive call determines total time
+        network_hop_duration = secrets.randbelow(2_000_000) + 500_000
+        # Add specific dependency latency if configured
+        network_hop_duration += self._get_latency_ns(dep.latency)
+
+        downstream_start_time = start_time + network_hop_duration
+        # The end time is now determined by the recursive call, so we set it later.
+        # This is a placeholder, it will be updated after the recursive call returns.
+        end_time = downstream_start_time 
 
         attributes = {
             'net.peer.name': dep.service,
@@ -604,8 +638,9 @@ class TelemetryGenerator:
             "status": {"code": "STATUS_CODE_OK"}, "attributes": attributes
         }, downstream_start_time)
 
-    def _create_db_span(self, service: Service, dep: Union[DbDependency, CacheDependency], trace_id, parent_id, child_id, start_time):
+    def _create_db_span(self, service: Service, dep: Union[DbDependency, CacheDependency], trace_id, parent_id, child_id, start_time, operation: Optional[Operation]):
         duration = secrets.randbelow(30_000_000) + 5_000_000  # 5-35ms for db query
+        duration += self._get_latency_ns(dep.latency)
         end_time = start_time + duration
         
         if isinstance(dep, DbDependency):
@@ -621,6 +656,15 @@ class TelemetryGenerator:
         attributes = {}
         span_name = f"QUERY {db_name}" if isinstance(dep, DbDependency) else f"GET {db_name}"
 
+        # --- Use realistic queries from config ---
+        query = None
+        # 1. Prefer query from the specific operation
+        if operation and operation.db_queries:
+            query = secrets.choice(operation.db_queries)
+        # 2. Fallback to query from the dependency definition
+        elif dep.example_queries:
+            query = secrets.choice(dep.example_queries)
+
         if db_instance:
             attributes["db.system"] = db_instance.type
             attributes["db.name"] = db_instance.name
@@ -628,16 +672,15 @@ class TelemetryGenerator:
             table_name = service.name.replace('-service', '').lower() + 's'
 
             if db_instance.type in ('postgres', 'mysql', 'mariadb', 'mssql'):
-                attributes["db.statement"] = f"SELECT * FROM {table_name} WHERE id = ?"
+                attributes["db.statement"] = query or f"SELECT * FROM {table_name} WHERE id = ?"
                 attributes["db.operation"] = "SELECT"
                 span_name = f"SELECT {db_name}"
             elif db_instance.type == 'redis':
-                session_id = secrets.token_hex(8)
-                attributes["db.statement"] = f"GET user_session:{session_id}"
+                attributes["db.statement"] = query or f"GET user_session:{secrets.token_hex(8)}"
                 attributes["db.operation"] = "GET"
                 span_name = f"GET {db_name}"
             elif db_instance.type == 'mongodb':
-                attributes["db.statement"] = f"db.{table_name}.findOne({{ \"_id\": ObjectId(\"...\") }})"
+                attributes["db.statement"] = query or f"db.{table_name}.findOne({{ \"_id\": ObjectId(\"...\") }})"
                 attributes["db.operation"] = "find"
                 span_name = f"FIND {db_name}"
         

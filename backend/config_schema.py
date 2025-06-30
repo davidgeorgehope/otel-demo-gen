@@ -10,17 +10,41 @@ class StartDemoRequest(BaseModel):
     otlp_endpoint: str
     api_key: Optional[str] = None
 
-# Pydantic models for parsing the YAML configuration
+# --- New Models for Enhanced Realism ---
+
+class LatencyConfig(BaseModel):
+    """Defines latency characteristics for an operation or dependency."""
+    min_ms: int = Field(..., description="Minimum latency in milliseconds.")
+    max_ms: int = Field(..., description="Maximum latency in milliseconds.")
+    probability: float = Field(1.0, description="Probability of this latency occurring (0.0 to 1.0).")
+
+class Operation(BaseModel):
+    """Defines a specific business operation within a service."""
+    name: str = Field(..., description="A friendly name for the operation (e.g., 'ProcessPayment').")
+    span_name: str = Field(..., description="The desired name for the root span (e.g., 'POST /payments').")
+    description: Optional[str] = None
+    db_queries: Optional[List[str]] = Field(default_factory=list, description="List of realistic DB queries for this operation.")
+    latency: Optional[LatencyConfig] = None
+
+# --- Updated YAML Configuration Models ---
+
 class ServiceDependency(BaseModel):
     service: str
     protocol: Optional[str] = None
     via: Optional[str] = None
+    example_queries: Optional[List[str]] = Field(default_factory=list)
+    latency: Optional[LatencyConfig] = None
+
 
 class DbDependency(BaseModel):
     db: str
+    example_queries: Optional[List[str]] = Field(default_factory=list)
+    latency: Optional[LatencyConfig] = None
 
 class CacheDependency(BaseModel):
     cache: str
+    example_queries: Optional[List[str]] = Field(default_factory=list)
+    latency: Optional[LatencyConfig] = None
 
 class QueueDependency(BaseModel):
     queue: str
@@ -31,7 +55,8 @@ class Service(BaseModel):
     name: str
     language: Optional[str] = 'python'
     role: Optional[str] = None
-    depends_on: List[AnyDependency] = []
+    depends_on: List[AnyDependency] = Field(default_factory=list)
+    operations: Optional[List[Operation]] = Field(default_factory=list, description="Specific business operations for this service.")
 
 class Database(BaseModel):
     name: str

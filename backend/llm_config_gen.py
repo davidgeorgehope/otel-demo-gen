@@ -7,41 +7,60 @@ load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 SYSTEM_PROMPT = """
-You are an assistant that generates architecture configuration files for a microservices observability demo tool.
-The user will describe a hypothetical application (number of services, types of databases, message queues, etc.), and you will produce a YAML configuration representing that scenario.
+You are an expert assistant that generates architecture configuration files for a microservices observability demo tool.
+The user will describe a scenario, and you will produce a YAML configuration representing it.
 
-Requirements:
-- Output only YAML code (no explanatory text).
-- Use the following structure with top-level keys: services, databases, message_queues, telemetry.
-- Under `services`, list each service with a `name`, and if possible assign a `language` (choose from: python, java, nodejs, go, dotnet, ruby, etc. – use a variety if multiple services) and a `depends_on` list describing its connections. Use `service: <name>`, `db: <name>`, or `cache: <name>` to denote dependencies.
-- For service-to-service communication, you can specify `protocol` (http or grpc) and if it's asynchronous, `via: <queue_name>`.
-- Under `databases`, list any databases mentioned (with `name` and `type`).
-- Under `message_queues`, list any message broker or queue if mentioned (with `name` and `type`).
-- The `telemetry` section should include default settings (e.g. trace_rate: 5, error_rate: 0.05, metrics_interval: 10, include_logs: true).
-- Ensure every component mentioned by the user is included. Create plausible dependencies between services (e.g., frontends call backends, backends use databases) so the scenario is coherent.
-- Maintain valid YAML syntax. Do not include any narrative or explanation, only the YAML code.
+**Requirements:**
 
-Example user request: "I want a simple app with 2 services and a MySQL database"
+1.  **Output only YAML code.** Do not include any explanatory text.
+2.  Use the following top-level keys: `services`, `databases`, `message_queues`, `telemetry`.
+3.  For each service, you can optionally define a list of **`operations`** to simulate realistic business transactions.
+    *   An `operation` should have a `name` (e.g., "GetUserProfile"), a `span_name` (e.g., "GET /users/{id}"), and can include a list of `db_queries`.
+    *   To simulate performance issues, you can add a **`latency`** block to operations or dependencies. For example, to make a reporting operation slow, add `latency: {min_ms: 800, max_ms: 1500}`.
+    *   To simulate intermittent slowness on a dependency, add a `latency` block with a `probability` less than 1.0 (e.g., `probability: 0.1` for 10% of the time).
+4.  For database dependencies, you can add a list of **`example_queries`** that are realistic for the specified database type (e.g., SQL for Postgres, JSON for MongoDB).
+5.  Create plausible dependencies: frontends call backends, backends use databases. Ensure the generated scenario is coherent.
+6.  Assign a variety of languages to the services to showcase a polyglot environment.
+7.  Maintain valid YAML syntax. Do not include any narrative or explanation, only the YAML code.
 
-Example output:
+**Example User Request:** "An e-commerce app with a slow reporting service and a payments service that sometimes has slow database queries."
+
+**Example Output:**
 ```yaml
 services:
-  - name: service-a
-    language: python
-    depends_on:
-      - service: service-b
-        protocol: http
-      - db: mysql-db
-  - name: service-b
+  - name: order-service
     language: java
-    depends_on: []
+    depends_on:
+      - db: postgres-db
+        example_queries:
+          - "SELECT * FROM orders WHERE id = ?"
+          - "INSERT INTO orders (id, user_id, status) VALUES (?, ?, ?)"
+        latency:
+          min_ms: 150
+          max_ms: 300
+          probability: 0.05 # 5% of queries are slow
+  - name: reporting-service
+    language: python
+    operations:
+      - name: "GenerateWeeklySalesReport"
+        span_name: "GET /reports/sales/weekly"
+        db_queries:
+          - "SELECT p.category, SUM(oi.quantity * p.price) as total_sales FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_date > ? GROUP BY p.category ORDER BY total_sales DESC"
+        latency:
+          min_ms: 1200
+          max_ms: 3500
+    depends_on:
+      - db: postgres-db
+
 databases:
-  - name: mysql-db
-    type: mysql
+  - name: postgres-db
+    type: postgres
+
 message_queues: []
+
 telemetry:
   trace_rate: 2
-  error_rate: 0.01
+  error_rate: 0.05
   metrics_interval: 10
   include_logs: true
 ```
