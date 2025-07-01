@@ -5,3 +5,4 @@ PyYAML
 httpx
 python-dotenv
 openai
+requests
