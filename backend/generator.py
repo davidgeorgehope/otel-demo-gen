@@ -17,12 +17,12 @@ class TelemetryGenerator:
     Generates and sends telemetry data (traces, metrics, logs) based on a scenario config.
     """
     SPAN_KIND_MAP = {
-        "SPAN_KIND_UNSPECIFIED": 0,
-        "SPAN_KIND_INTERNAL": 1,
-        "SPAN_KIND_SERVER": 2,
-        "SPAN_KIND_CLIENT": 3,
-        "SPAN_KIND_PRODUCER": 4,
-        "SPAN_KIND_CONSUMER": 5,
+        "UNSPECIFIED": 0,
+        "INTERNAL": 1,
+        "SERVER": 2,
+        "CLIENT": 3,
+        "PRODUCER": 4,
+        "CONSUMER": 5,
     }
 
     STATUS_CODE_MAP = {
@@ -224,24 +224,38 @@ class TelemetryGenerator:
             formatted.append({"key": key, "value": val_dict})
         return formatted
 
-    def _find_entry_point(self) -> Service | None:
-        """Finds a service that is not a dependency of any other service."""
+    def _find_entry_points(self) -> List[Service]:
+        """Finds all services that are not dependencies of any other service."""
         if not self.config.services:
-            return None
+            return []
 
         dependency_names = set()
         for service in self.config.services:
             for dep in service.depends_on:
                 if isinstance(dep, ServiceDependency):
                     dependency_names.add(dep.service)
-
-        for service in self.config.services:
-            if service.name not in dependency_names:
-                return service
+        
+        entry_points = [
+            service for service in self.config.services
+            if service.name not in dependency_names
+        ]
 
         # Fallback: if all services are dependencies (e.g., a cycle),
-        # return the first service in the list.
-        return self.config.services[0]
+        # return the full list of services to choose from.
+        if not entry_points:
+            return self.config.services
+            
+        return entry_points
+
+    def _get_transaction_result(self, status_code: int) -> str:
+        """Generates a transaction result string from an HTTP status code."""
+        if 200 <= status_code < 300:
+            return f"HTTP {status_code // 100}xx"
+        if 400 <= status_code < 500:
+            return f"HTTP {status_code // 100}xx"
+        if 500 <= status_code < 600:
+            return f"HTTP {status_code // 100}xx"
+        return "Unknown"
 
     def _get_latency_ns(self, latency_config: Optional['LatencyConfig']) -> int:
         """Calculates a latency in nanoseconds based on a LatencyConfig."""
@@ -426,9 +440,11 @@ class TelemetryGenerator:
         spans_by_service: Dict[str, List[Dict[str, Any]]] = {
             s.name: [] for s in self.config.services
         }
-        entry_point = self._find_entry_point()
-        if not entry_point:
+        entry_points = self._find_entry_points()
+        if not entry_points:
             return {}
+        
+        entry_point = secrets.choice(entry_points)
 
         trace_id = self._generate_id(16)
         trace_has_error = random.random() < self.config.telemetry.error_rate
@@ -436,11 +452,6 @@ class TelemetryGenerator:
         # If an error occurs, pick a random service to be the initial point of failure.
         error_source = secrets.choice(self.config.services).name if trace_has_error else None
         
-        # --- Select a specific operation if available ---
-        operation = None
-        if entry_point.name in self.service_operations_map and self.service_operations_map[entry_point.name]:
-            operation = secrets.choice(list(self.service_operations_map[entry_point.name].values()))
-
         self._generate_span_recursive(
             service_name=entry_point.name,
             parent_span_id=None,
@@ -448,10 +459,9 @@ class TelemetryGenerator:
             spans_by_service=spans_by_service,
             start_time_ns=time.time_ns(),
             error_source=error_source,
-            trigger_kind="SPAN_KIND_SERVER",
+            trigger_kind="SERVER",
             visited_services=set(),
-            recursion_depth=0,
-            operation=operation
+            recursion_depth=0
         )
 
         return spans_by_service
@@ -467,7 +477,7 @@ class TelemetryGenerator:
         trigger_kind: str,
         visited_services: set,
         recursion_depth: int,
-        operation: Optional[Operation] = None
+        trigger_context: Optional[Dict[str, Any]] = None
     ) -> Tuple[int, bool]:
         """
         Recursively generates spans for a service and its dependencies.
@@ -486,6 +496,11 @@ class TelemetryGenerator:
 
         span_id = self._generate_id(8)
         
+        # --- Select an operation if available for the CURRENT service ---
+        operation = None
+        if service_name in self.service_operations_map and self.service_operations_map[service_name]:
+            operation = secrets.choice(list(self.service_operations_map[service_name].values()))
+
         # --- Latency Calculation ---
         # Start with a base processing time
         own_processing_time_ns = secrets.randbelow(20_000_000) + 5_000_000
@@ -494,8 +509,36 @@ class TelemetryGenerator:
             own_processing_time_ns += self._get_latency_ns(operation.latency)
 
         # Determine the span name
-        span_name = operation.span_name if operation else f"{service.name} {trigger_kind.split('_')[-1].lower()}"
+        span_name = ""
+        if operation:
+            span_name = operation.span_name
+        else:
+            if trigger_kind == 'SERVER':
+                span_name = f"{service.name} process"
+            elif trigger_kind == 'CONSUMER':
+                queue_name = trigger_context.get('queue_name', 'unknown_queue') if trigger_context else 'unknown_queue'
+                span_name = f"{queue_name} process"
+            else:
+                span_name = service.name
+
+        attributes = {}
+        # For root spans, explicitly set the transaction name attribute for better APM integration.
+        if trigger_kind == "SERVER":
+            attributes["transaction.name"] = span_name
         
+        # --- Add messaging attributes for CONSUMER spans ---
+        if trigger_kind == "CONSUMER" and trigger_context:
+            queue_name = trigger_context.get('queue_name', 'unknown_queue')
+            queue_system = trigger_context.get('queue_system', 'kafka') # Assume kafka if not specified
+            attributes['messaging.system'] = queue_system
+            attributes['messaging.destination.name'] = queue_name
+            attributes['messaging.operation'] = 'process'
+            attributes['network.transport'] = 'tcp'
+            attributes['messaging.consumer.id'] = f"{service.name}-consumer-group"
+            if queue_system == 'kafka':
+                attributes['messaging.kafka.destination.partition'] = str(secrets.randbelow(3))
+                attributes['messaging.kafka.message.offset'] = str(secrets.randbelow(100000))
+
         service_span = {
             "traceId": trace_id,
             "spanId": span_id,
@@ -503,7 +546,7 @@ class TelemetryGenerator:
             "name": span_name,
             "kind": trigger_kind,
             "startTimeUnixNano": str(start_time_ns),
-            "attributes": {},
+            "attributes": attributes,
         }
 
         child_start_time_ns = start_time_ns + secrets.randbelow(3_000_000) + 1_000_000
@@ -521,6 +564,8 @@ class TelemetryGenerator:
                     queue_delay_ns = secrets.randbelow(10_000_000) + 5_000_000
                     consumer_start_time = int(producer_span["endTimeUnixNano"]) + queue_delay_ns
 
+                    queue_system = producer_span.get("attributes", {}).get("messaging.system", "kafka")
+
                     end_time, error_in_branch = self._generate_span_recursive(
                         service_name=dep.service,
                         parent_span_id=child_span_id,
@@ -528,16 +573,19 @@ class TelemetryGenerator:
                         spans_by_service=spans_by_service,
                         start_time_ns=consumer_start_time,
                         error_source=error_source,
-                        trigger_kind="SPAN_KIND_CONSUMER",
+                        trigger_kind="CONSUMER",
                         visited_services=current_path_visited,
                         recursion_depth=recursion_depth + 1,
-                        operation=None # Operations don't propagate through queues
+                        trigger_context={'queue_name': dep.via, 'queue_system': queue_system}
                     )
                     if error_in_branch:
                         downstream_error = True
                     latest_child_end_time_ns = max(latest_child_end_time_ns, end_time, int(producer_span["endTimeUnixNano"]))
                 else:
                     client_span, downstream_start_time = self._create_client_span(service, dep, trace_id, span_id, child_span_id, child_start_time_ns)
+                    
+                    # Initialize status_code with default success value
+                    status_code = 200
                     
                     end_time, error_in_branch = self._generate_span_recursive(
                         service_name=dep.service,
@@ -546,19 +594,23 @@ class TelemetryGenerator:
                         spans_by_service=spans_by_service,
                         start_time_ns=downstream_start_time,
                         error_source=error_source,
-                        trigger_kind="SPAN_KIND_SERVER",
+                        trigger_kind="SERVER",
                         visited_services=current_path_visited,
-                        recursion_depth=recursion_depth + 1,
-                        operation=operation # Propagate operation context
+                        recursion_depth=recursion_depth + 1
                     )
                     if error_in_branch:
                         downstream_error = True
                         client_span["status"]["code"] = "STATUS_CODE_ERROR"
-                        if client_span.get("attributes", {}).get("http.request.method"):
+                        if "http.request.method" in client_span["attributes"]:
                              client_span["attributes"]["http.response.status_code"] = 500
-                        elif client_span.get("attributes", {}).get("rpc.system"):
+                             status_code = 500
+                        elif "rpc.system" in client_span["attributes"]:
                              client_span["attributes"]["rpc.grpc.status_code"] = 13
                     
+                    # Add transaction result for HTTP spans
+                    if "http.request.method" in client_span["attributes"]:
+                        client_span["attributes"]["transaction.result"] = self._get_transaction_result(status_code)
+
                     client_span["endTimeUnixNano"] = str(end_time) # Update client span end time
                     spans_by_service[service.name].append(client_span)
                     latest_child_end_time_ns = max(latest_child_end_time_ns, end_time)
@@ -574,6 +626,27 @@ class TelemetryGenerator:
         service_span["endTimeUnixNano"] = str(service_span_end_time)
         service_span["status"] = {"code": "STATUS_CODE_ERROR"} if total_error else {"code": "STATUS_CODE_OK"}
         
+        # --- Add final HTTP attributes to SERVER span ---
+        if trigger_kind == "SERVER":
+            try:
+                parts = service_span["name"].split()
+                if len(parts) >= 2 and parts[0] in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE'):
+                    method = parts[0]
+                    path = " ".join(parts[1:])
+                else: # Fallback for non-standard span names
+                    method = 'GET'
+                    path = '/'
+            except Exception:
+                method = 'GET'
+                path = '/'
+            
+            status_code = 500 if total_error else 200
+            
+            service_span["attributes"]['http.request.method'] = method
+            service_span["attributes"]['url.path'] = path
+            service_span["attributes"]['http.response.status_code'] = status_code
+            service_span["attributes"]['transaction.result'] = self._get_transaction_result(status_code)
+
         spans_by_service[service.name].append(service_span)
 
         return service_span_end_time, total_error
@@ -583,17 +656,21 @@ class TelemetryGenerator:
         end_time = start_time + duration
         queue = self.mq_map.get(dep.via) if dep.via else None
         
+        destination_name = queue.name if queue else dep.via
+
         attributes = {
             "messaging.system": queue.type if queue else "unknown",
-            "messaging.destination.name": queue.name if queue else dep.via,
+            "messaging.destination.name": destination_name,
             "messaging.operation": "publish",
-            "net.peer.name": queue.name if queue else None,
+            "server.address": queue.name if queue else None,
+            "network.transport": "tcp",
+            "messaging.kafka.destination.partition": str(secrets.randbelow(3)), # Simulate 3 partitions
         }
         attributes = {k: v for k,v in attributes.items() if v is not None}
 
         return {
             "traceId": trace_id, "spanId": child_id, "parentSpanId": parent_id,
-            "name": f"PUBLISH {dep.via}", "kind": "SPAN_KIND_PRODUCER",
+            "name": f"{destination_name} publish", "kind": "PRODUCER",
             "startTimeUnixNano": str(start_time), "endTimeUnixNano": str(end_time),
             "status": {"code": "STATUS_CODE_OK"}, "attributes": attributes
         }
@@ -617,9 +694,11 @@ class TelemetryGenerator:
 
         if protocol == 'http':
             method = secrets.choice(['GET', 'POST', 'PUT', 'DELETE'])
+            path = f"/{service.name.lower()}/{secrets.token_hex(4)}"
             attributes['http.request.method'] = method
-            attributes['http.response.status_code'] = 200
-            attributes['url.full'] = f"http://{dep.service}/{service.name.lower()}/{secrets.token_hex(4)}"
+            attributes['http.response.status_code'] = 200 # default, will be overwritten on error
+            attributes['url.path'] = path
+            attributes['url.full'] = f"http://{dep.service}{path}"
             attributes['server.address'] = dep.service
             span_name = f"HTTP {method}"
         elif protocol == 'grpc':
@@ -633,7 +712,7 @@ class TelemetryGenerator:
 
         return ({
             "traceId": trace_id, "spanId": child_id, "parentSpanId": parent_id,
-            "name": span_name, "kind": "SPAN_KIND_CLIENT",
+            "name": span_name, "kind": "CLIENT",
             "startTimeUnixNano": str(start_time), "endTimeUnixNano": str(end_time),
             "status": {"code": "STATUS_CODE_OK"}, "attributes": attributes
         }, downstream_start_time)
@@ -672,21 +751,41 @@ class TelemetryGenerator:
             table_name = service.name.replace('-service', '').lower() + 's'
 
             if db_instance.type in ('postgres', 'mysql', 'mariadb', 'mssql'):
-                attributes["db.statement"] = query or f"SELECT * FROM {table_name} WHERE id = ?"
-                attributes["db.operation"] = "SELECT"
-                span_name = f"SELECT {db_name}"
+                final_query = query or f"SELECT * FROM {table_name} WHERE id = ?"
+                attributes["db.statement"] = final_query
+                
+                # Infer operation from query
+                inferred_op = final_query.strip().upper().split()[0]
+                if inferred_op in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                    attributes["db.operation"] = inferred_op
+                    span_name = f"{inferred_op} {db_name}"
+                else: # Fallback for complex queries like CTEs or non-standard SQL
+                    attributes["db.operation"] = "query"
+                    span_name = f"QUERY {db_name}"
+
             elif db_instance.type == 'redis':
-                attributes["db.statement"] = query or f"GET user_session:{secrets.token_hex(8)}"
-                attributes["db.operation"] = "GET"
-                span_name = f"GET {db_name}"
+                final_query = query or f"GET user_session:{secrets.token_hex(8)}"
+                attributes["db.statement"] = final_query
+                inferred_op = final_query.strip().upper().split()[0]
+                attributes["db.operation"] = inferred_op if inferred_op else "GET"
+                span_name = f"{attributes['db.operation']} {db_name}"
             elif db_instance.type == 'mongodb':
-                attributes["db.statement"] = query or f"db.{table_name}.findOne({{ \"_id\": ObjectId(\"...\") }})"
-                attributes["db.operation"] = "find"
-                span_name = f"FIND {db_name}"
+                final_query = query or f"db.{table_name}.findOne({{ \"_id\": ObjectId(\"...\") }})"
+                attributes["db.statement"] = final_query
+                # A simple heuristic for MongoDB query types
+                if "find" in final_query:
+                    attributes["db.operation"] = "find"
+                elif "insert" in final_query:
+                    attributes["db.operation"] = "insert"
+                elif "update" in final_query:
+                    attributes["db.operation"] = "update"
+                else:
+                    attributes["db.operation"] = "query"
+                span_name = f"{attributes['db.operation'].upper()} {db_name}"
         
         return ({
             "traceId": trace_id, "spanId": child_id, "parentSpanId": parent_id,
-            "name": span_name, "kind": "SPAN_KIND_CLIENT",
+            "name": span_name, "kind": "CLIENT",
             "startTimeUnixNano": str(start_time), "endTimeUnixNano": str(end_time),
             "status": {"code": "STATUS_CODE_OK"}, "attributes": attributes
         }, end_time)
