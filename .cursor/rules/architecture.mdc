@@ -3,384 +3,523 @@ description:
 globs: 
 alwaysApply: true
 ---
-AI-Powered Observability Demo Generator: Implementation Plan
-Overview and MVP Scope
-The goal is to build a tool that can generate realistic telemetry data (traces, logs, and metrics) for a user-defined microservices scenario. The user interacts with a chat-like UI to describe a scenario (e.g. “a financial services app with 10 microservices, Postgres and Redis databases, and a Kafka queue”), and the system will produce a configuration file for that scenario. A backend service will then use this config to continuously stream synthetic telemetry (in real-time) into an OpenTelemetry (OTel) Collector via OTLP. For the MVP, we will include all three signal types – distributed traces, logs, and metrics – rather than limiting scope to traces
-github.com
-. This ensures a comprehensive demo of Observability features. The synthetic telemetry should be highly realistic, simulating service interactions, dependencies, errors, and performance patterns (e.g. varying latencies, error rates, resource usage spikes) to resemble real-world behavior. Key points for the MVP scope:
-Telemetry Signals: Generate traces, logs, and metrics in OTLP format for the scenario
-github.com
-. Traces will simulate distributed transactions across services; logs will include application logs (with trace context for correlation); metrics will include both generic system metrics and technology-specific runtime metrics.
-Continuous Real-Time Output: The generator will run continuously, emitting telemetry at a configurable rate (e.g. X traces per second, periodic metrics, etc.), so that the demo behaves like a live system with ongoing activity
-github.com
-.
-User-Driven Configuration: An LLM (Large Language Model) will interpret the user’s natural language description and produce a structured config (likely YAML for readability) defining the services and their interactions. This allows even non-experts to create a custom demo by simply describing it in plain language.
-Realism: The generated telemetry should resemble data from distinct services running on different tech stacks. This includes simulating multiple languages (with appropriate attributes like telemetry.sdk.language) and runtime behaviors (e.g. Java services reporting JVM GC metrics, Node.js services reporting event loop delays, Go services reporting goroutine counts, etc.) for authenticity
-opentelemetry.io
-opentelemetry.io
-. We will introduce realistic patterns like intermittent errors, latency spikes, and possibly known anti-patterns (e.g. N+1 database queries, excessive logging) to make the demo useful for problem detection
-reddit.com
-.
-By covering all these aspects in the MVP, the tool will let users spin up rich observability demos on demand, without requiring actual apps – just by using AI to configure a fake microservice environment and generating OTLP telemetry for it.
-System Architecture and Design
-The system will be composed of several components working together:
-Frontend UI: A web interface (likely a single-page app built with Node.js and a modern UI framework like React, styled with Tailwind CSS) where the user enters their scenario description. This could be a chat-style prompt or a simple form. The UI will communicate with the backend to retrieve the generated config and control the telemetry simulation.
-Backend LLM Service (Python): The backend (built in Python) will host two main services:
-Config Generator Service – This uses an LLM (e.g. via OpenAI API) to convert the user’s description into a structured YAML configuration. It will supply the LLM with a carefully crafted system prompt (defining the expected YAML schema and guidelines) and the user’s scenario prompt. The LLM’s output is the YAML config text.
-Telemetry Generator Service – This service reads the YAML config and simulates the telemetry data. It will manually construct OTLP-compliant JSON payloads (per OTLP spec) for traces, logs, and metrics, and send them to an OpenTelemetry Collector endpoint over HTTP. By crafting the OTLP payloads ourselves (instead of using the OpenTelemetry SDK in-process), we can emit data that appears to come from multiple distinct services and languages. Each payload will include appropriate resource attributes like service.name and telemetry.sdk.language to differentiate the simulated services
-opentelemetry.io
-. This design avoids using one SDK instance that would mark all telemetry with the same origin, which would make it look like a single process; instead, we control the identifiers to simulate a heterogeneous microservice environment (one process generating data for many virtual services).
-OpenTelemetry Collector: The OTEL Collector is an external component (could run as a Docker container or service) configured to receive OTLP data (via HTTP or gRPC) on the standard ports. Our generator will send data to the collector’s OTLP receiver (default HTTP endpoint http://<collector>:4318/v1/traces for traces, and similarly /v1/logs and /v1/metrics
-github.com
-). The Collector can then export this data to the desired backend (e.g. Elastic Observability, Jaeger, Prometheus, etc., depending on collector config). For development, the Collector might simply log the data or write to a file, but in a demo deployment it would forward to an observability platform.
-Observability Backend (external): Though not part of our tool, it’s worth noting where the data ends up. In an Elastic Observability context, the Collector could export to Elastic APM/Observability (or any OTLP-compatible backend). This way, when the demo runs, the user can see the telemetry (traces, metrics, logs) in their observability dashboards as if real services were running.
-Data Flow: When the user submits a scenario description in the UI, the frontend sends it to the backend’s Config Generator API. The backend calls the LLM to create a YAML config. The YAML is then shown to the user (for transparency or editing if desired) and is fed into the Telemetry Generator. The Telemetry Generator then begins emitting data to the Collector continuously. The user can observe the data in real-time on their chosen observability dashboards. The frontend might also provide controls to start/stop the simulation or adjust the rate. Architectural Considerations:
-We will design the backend to be stateless in terms of config generation (each request to generate config is independent). The Telemetry Generator, however, will maintain state while running (e.g. open threads sending data, counters for request IDs, etc.).
-The system should be deployable both locally and in cloud/Kubernetes. We’ll use Docker for the backend (Python) and frontend (Node) to containerize them. In Kubernetes, these can run as services along with an OTel Collector deployment. (For local desktop use, the user can run the Python app directly and point it to a local Collector).
-Communication: Frontend <-> Backend can be a simple REST API (JSON over HTTP). For example, a POST endpoint like /generate_config to produce the YAML, and perhaps endpoints to start/stop the simulation or stream status. The frontend might also display some basic telemetry stats (e.g. number of traces sent) by polling the backend or subscribing via WebSocket (optional enhancement).
-Performance: Generating telemetry can be resource-intensive if the rate is high. We should allow configuration of the data rate. The generator can use multi-threading or asyncio to simulate concurrent service activity. For instance, each simulated service could run in its own thread or async task, periodically sending its metrics and logs, while trace generation could be triggered by a separate “load generator” loop that initiates a trace through the service graph.
-Extensibility: The architecture should accommodate adding more complex behaviors later (e.g. simulating network delays, scaling to hundreds of services, etc.) by updating the config schema and generation logic, without needing major overhauls.
-In summary, the design centers on a Python backend that does the heavy lifting (with AI and data generation), a web frontend for user interaction, and the use of an OTel Collector to handle the telemetry pipeline to the final backend.
-Tech Stack and Deployment
-Backend: We will use Python (3.9+ recommended) for the backend services. Python is chosen for its ease of use in scripting, YAML/JSON handling, and calling AI APIs. The LLM integration can be done with an OpenAI Python SDK or HTTP requests. The telemetry generator will use Python libraries like yaml (PyYAML) to parse config and possibly requests or httpx to send HTTP POSTs to the collector. We avoid using the OpenTelemetry SDK directly (as explained) and instead manually format OTLP JSON; Python’s standard libraries or dataclasses can represent the JSON structure. Python’s concurrency (via threading or asyncio) will help simulate concurrent services. If needed for performance, we could use multiprocessing or even consider a faster language, but Python should suffice for moderate telemetry rates in a demo. Frontend: For the UI, we’ll use Node.js with a framework like React (possibly Next.js for convenience) and Tailwind CSS for styling. The UI will be relatively simple – a text input for the scenario description, a “Generate” button, and perhaps a display of the resulting YAML and controls to start/stop the simulation. We can also show some live stats or a visualization of the service graph (future enhancement). Node will serve the frontend (and could also provide a small proxy to the Python API if needed, though direct calls from frontend to Python service API is fine if CORS is allowed). Since the user specifically mentioned Tailwind, we’ll ensure a clean, responsive design with it. LLM Integration: We’ll likely use an external AI service (like OpenAI’s GPT-4) via API. That means we need to manage API keys and network access in the backend. If offline or open-source LLM is desired for local use, we might integrate something like HuggingFace transformers, but for MVP, using a hosted API will be faster to implement. The LLM calls will be made from the Python backend upon request. Hosting & Deployment: We will containerize both frontend and backend. A Docker Compose configuration can be provided to run the frontend, backend, and an OpenTelemetry Collector together for local testing. For cloud/Kubernetes, each component can be a deployment (with perhaps the Collector and our backend in the same pod for simplicity in a demo, or separate). We should not assume cloud-only – it should also run on a developer’s desktop. So, we’ll keep things simple: e.g., the collector endpoint (host URL) can be configurable (environment variable or a field in the UI). If running locally, localhost:4318 could be used; in Kubernetes, it might be a service name. Security & Access: If the tool is deployed (e.g., in a shared environment), we might need authentication on the UI/backend (to prevent misuse of the LLM or telemetry flood). For MVP, likely not a big concern if used internally. But we’ll keep the API keys secure (not exposed to frontend) and possibly rate-limit the LLM usage if necessary. Libraries/Frameworks:
-Backend: FastAPI or Flask for the REST API (FastAPI is a good choice for async support if needed, plus automatic docs). PyYAML for parsing YAML. requests for HTTP to collector. Possibly uuid for generating trace/span IDs. We might also use protobuf definitions for OTLP if we wanted to construct objects and then serialize to JSON, but that may be overkill if we can directly form the JSON.
-Frontend: React + Tailwind, or even a simpler approach like a static HTML/JS page using a CDN-hosted LLM (not applicable here since we need backend anyway). Given the ask for Node, we assume a proper React app setup.
-By using this tech stack, we ensure the project stays within familiar, widely supported technologies. Python and Node are both cross-platform, and using Docker will allow easy deployment on Kubernetes (the Python app can be in one container, Node app in another, plus an OpenTelemetry Collector container).
-Configuration File Design (YAML)
-We will define a YAML schema that captures the key elements of the user’s desired architecture. This config is central – it describes what services exist, how they connect, what infrastructure components (databases, message queues) are present, and any specific telemetry settings (like rates or error injection). Simplicity and clarity are important, so that the LLM can produce it reliably and humans can read/modify it. Proposed YAML Structure:
-services: A list of services (microservices) in the architecture. For each service, we can include properties:
-name: a unique name for the service (e.g. frontend, payments-api, etc.).
-language: (optional) programming language or runtime to simulate (e.g. python, java, nodejs, go). This can drive what runtime-specific metrics to generate and what telemetry.sdk.language attribute to use.
-role or type: (optional) classification like frontend, backend, database-service, etc., just for semantics (could affect typical behavior, e.g. a frontend might receive external requests).
-depends_on: a list of dependencies this service calls. Each dependency could be another service or a database or queue. We can indicate the communication mode:
-If it calls another service, we might specify the protocol (http, grpc, etc.) or via which message queue.
-If it communicates via a message queue, we specify the queue name.
-If it uses a database, we specify which database resource it uses.
-Example:
-yaml
-Copy
-Edit
-- name: order-service  
-  language: java  
-  depends_on:  
-    - service: payment-service via HTTP  
-    - db: postgres-main  
-databases: A list of database instances:
-name: name/id of the database (used by services to reference it).
-type: the database technology (e.g. postgres, mongodb, redis).
-Optionally we could include any specific behaviors (like if we want to simulate slow queries on one DB, etc., in advanced cases).
-message_queues: A list of message queue systems:
-name: identifier for the queue.
-type: e.g. kafka, rabbitmq.
-We might not need to simulate the queue in detail; it’s mainly to note when a service’s call goes through a queue (which might imply a context break or certain span semantics). For MVP, the queue can be treated as part of the trace (we can model a span for the enqueue and dequeue).
-connections / flows: We could either infer connections from the depends_on in services, or have a separate section that explicitly lists high-level flows (like a user request flow). However, listing in two places is redundant. We’ll likely use the depends_on in each service to build the call graph. The LLM will essentially output something like a directed graph through those dependencies.
-telemetry_settings (or similar section): Global settings for the simulation:
-trace_rate: how many root traces per second to generate (overall traffic). E.g. trace_rate: 5 for 5 traces per second originating from entry-point services.
-error_rate: fraction of traces that should result in an error (either an exception in a service, or a HTTP 5xx, etc.). E.g. error_rate: 0.1 for 10% errors.
-metrics_interval: how frequently to emit metrics for each service (e.g. 10s).
-include_logs: boolean or level settings for logs (e.g. log every request at INFO, errors at ERROR).
-Possibly flags to include certain special patterns (like simulate_n_plus_one_queries: true for a given service to do N+1 DB calls, etc., though this could also be implicitly decided by the LLM scenario).
-The YAML should be OTLP-agnostic (it describes the scenario, not the telemetry format). The backend will translate it into actual OTLP data. This way, the user (or LLM) doesn’t have to specify low-level things like trace IDs or metric names – the generator will handle that. Here’s a sample YAML config for a scenario (for illustration):
-yaml
-Copy
-Edit
-# Example Scenario: Online Banking App with microservices, databases, and a message queue.
+# AI-Powered Observability Demo Generator: Complete Architecture & Implementation Guide
+
+## Project Overview & Mission
+
+**Mission Statement**: Generate realistic, comprehensive telemetry data (traces, logs, metrics) for user-defined microservices scenarios through AI-powered configuration generation and sophisticated synthetic data simulation.
+
+**Core Value Proposition**: 
+- **Zero Infrastructure**: No need to deploy actual microservices for observability demos
+- **AI-Driven**: Natural language → production-ready observability scenarios  
+- **Maximum Realism**: Multi-language services, realistic performance patterns, semantic conventions
+- **Instant Setup**: From description to streaming telemetry in seconds
+
+**Target Use Cases**:
+- Observability platform demos and training
+- Testing observability tooling and alerting
+- Performance pattern simulation (N+1 queries, latency spikes, error cascades)
+- Multi-language polyglot environment simulation
+- Customer proof-of-concepts for observability vendors
+
+## Current Implementation Status ✅
+
+### ✅ Completed Components
+- **FastAPI Backend**: Full REST API with telemetry generation engine
+- **React/Vite Frontend**: Modern UI with Tailwind CSS styling
+- **OpenAI Integration**: o3 model for YAML config generation
+- **OTLP JSON Generation**: Complete traces, logs, metrics with semantic conventions
+- **Multi-language Simulation**: Runtime-specific metrics per language
+- **Sophisticated Config Schema**: Operations, latency configs, example queries
+- **Local Development Environment**: Automated startup scripts
+
+### ✅ Working Features
+- Natural language → YAML configuration generation
+- Real-time telemetry streaming to OTLP collectors
+- Comprehensive error injection and performance patterns
+- Resource attribute simulation for polyglot environments
+- Business operation modeling with realistic database queries
+- Probabilistic latency injection for performance testing
+
+## System Architecture
+
+### High-Level Data Flow
+```
+User Input (Natural Language) 
+    ↓ 
+OpenAI o3 Model 
+    ↓ 
+YAML Configuration 
+    ↓ 
+Telemetry Generation Engine 
+    ↓ 
+OTLP JSON Payloads 
+    ↓ 
+OpenTelemetry Collector 
+    ↓ 
+Observability Backend (Elastic, Jaeger, etc.)
+```
+
+### Component Architecture
+
+#### Backend Service (Python/FastAPI)
+**File Structure**:
+```
+backend/
+├── main.py              # FastAPI app, CORS, API endpoints
+├── generator.py         # Core telemetry generation engine  
+├── llm_config_gen.py    # OpenAI integration & system prompts
+├── config_schema.py     # Pydantic models & validation
+└── requirements.txt     # Dependencies
+```
+
+**API Endpoints**:
+- `POST /generate-config`: Natural language → YAML config
+- `POST /start`: Start telemetry generation with config
+- `POST /stop`: Stop telemetry generation
+- `GET /status`: Get generator status and current config
+- `GET /`: Health check
+
+**Key Classes & Responsibilities**:
+- `TelemetryGenerator`: Main orchestration, threading, OTLP payload generation
+- `ScenarioConfig`: Pydantic model for YAML configuration validation
+- `Service`, `Database`, `MessageQueue`: Configuration entities
+- `Operation`: Business operation modeling for realistic traces
+- `LatencyConfig`: Probabilistic performance simulation
+
+#### Frontend Service (React/Vite)
+**File Structure**:
+```
+frontend/src/
+├── App.jsx              # Main application component
+├── components/
+│   ├── Header.jsx       # Application header
+│   ├── ScenarioForm.jsx # Natural language input form
+│   ├── ConfigDisplay.jsx # YAML configuration display
+│   ├── Controls.jsx     # Start/stop telemetry controls
+│   └── StatusBar.jsx    # Generator status display
+└── main.jsx             # React app entry point
+```
+
+**Technology Stack**:
+- **React 18**: Component framework
+- **Vite**: Build tool and dev server  
+- **Tailwind CSS**: Utility-first styling
+- **js-yaml**: YAML parsing and validation
+
+#### Telemetry Generation Engine
+
+**Multi-Signal Generation**:
+1. **Traces**: Distributed transactions following service dependency graphs
+2. **Logs**: Correlated application logs with trace context
+3. **Metrics**: System metrics + runtime-specific metrics per language
+
+**Realism Features**:
+- **Semantic Conventions**: Proper OTLP attributes (http.method, db.system, etc.)
+- **Multi-Language Simulation**: Different telemetry.sdk.language per service
+- **Runtime Metrics**: JVM GC (Java), Event Loop (Node.js), Goroutines (Go)
+- **Performance Patterns**: Configurable latency, error injection, N+1 queries
+- **Resource Attributes**: Cloud provider, regions, host names, versions
+
+**OTLP JSON Payload Structure**:
+```json
+{
+  "resourceSpans": [{
+    "resource": {
+      "attributes": [
+        {"key": "service.name", "value": {"stringValue": "payment-service"}},
+        {"key": "telemetry.sdk.language", "value": {"stringValue": "java"}},
+        {"key": "cloud.provider", "value": {"stringValue": "aws"}}
+      ]
+    },
+    "scopeSpans": [{
+      "scope": {"name": "otel-demo-generator"},
+      "spans": [/* OTLP spans */]
+    }]
+  }]
+}
+```
+
+## Configuration Schema (YAML)
+
+### Complete Schema Definition
+```yaml
 services:
-  - name: frontend-web
-    language: typescript
-    role: frontend
+  - name: service-name
+    language: python|java|nodejs|go|ruby|dotnet|typescript
+    role: frontend|backend|database-service|worker
+    operations:  # NEW: Business operation modeling
+      - name: "ProcessPayment"
+        span_name: "POST /payments"
+        db_queries:
+          - "SELECT * FROM accounts WHERE id = ?"
+          - "UPDATE accounts SET balance = ? WHERE id = ?"
+        latency:  # NEW: Probabilistic performance simulation
+          min_ms: 50
+          max_ms: 200
+          probability: 0.9
     depends_on:
-      - service: accounts-service       # frontend calls accounts-service (HTTP)
-      - service: transactions-service   # frontend calls transactions-service (HTTP)
-  - name: accounts-service
-    language: python
-    depends_on:
-      - db: postgres-main              # uses PostgreSQL database
-      - service: notification-service via kafka-broker
-  - name: transactions-service
-    language: java
-    depends_on:
-      - service: risk-service          # calls risk-service (gRPC)
-      - db: postgres-main
-      - cache: redis-cache             # uses Redis cache
-  - name: notification-service
-    language: nodejs
-    # This service is triggered via Kafka, so it might not have direct incoming HTTP calls
-    depends_on:
-      - service: email-service         # sends email (could be an external call)
-  - name: risk-service
-    language: go
-    depends_on:
-      - service: fraud-service         # calls fraud-service (internal check)
-  - name: fraud-service
-    language: python
-    depends_on: []
-  - name: email-service
-    language: ruby
-    depends_on: []
+      - service: other-service
+        protocol: http|grpc
+        latency:
+          min_ms: 10
+          max_ms: 50
+          probability: 0.05  # 5% slow calls
+      - db: database-name
+        example_queries:
+          - "SELECT * FROM users WHERE email = ?"
+        latency:
+          min_ms: 5
+          max_ms: 500
+          probability: 0.02  # 2% slow queries
+      - cache: redis-cache
+      - queue: kafka-topic
+
 databases:
   - name: postgres-main
-    type: postgres
-  - name: redis-cache
-    type: redis
+    type: postgres|mysql|mongodb|redis
+
 message_queues:
   - name: kafka-broker
-    type: kafka
+    type: kafka|rabbitmq|sqs
+
 telemetry:
-  trace_rate: 5            # 5 traces (user transactions) per second
-  error_rate: 0.05         # 5% of requests result in errors
-  metrics_interval: 10s    # metrics reported every 10 seconds
+  trace_rate: 5           # Traces per second
+  error_rate: 0.05        # 5% error rate
+  metrics_interval: 10    # Seconds between metric emissions
   include_logs: true
-Explanation: In this example, we have a frontend-web service (likely the entry point for users) that calls two services. One of those (accounts-service) uses a Postgres DB and sends events to a Kafka topic for notification-service to pick up (simulating async processing). We have a transactions-service that calls a risk-service (perhaps to evaluate transactions) and also hits the database and a Redis cache. The risk-service calls a further fraud-service. There’s also an email-service that might be called by the notification service to send emails. We’ve listed various languages to simulate each (typescript for frontend, Python, Java, Go, Ruby, etc.) to illustrate multi-language support. The telemetry settings indicate we want a moderate load (5 traces/sec) and occasional errors. The generator backend will parse this YAML and understand that, for example:
-There is one entry-point service (frontend-web) which likely starts the trace (since others are called by it, directly or indirectly). The generator could treat any service with no other service calling it as an entry-point for trace generation.
-It will then simulate a trace workflow: e.g., a trace might start at frontend-web (span for an HTTP request), then have child spans for calls to accounts-service and transactions-service in parallel (if we choose to simulate parallel calls), etc. The accounts-service span might include a child span for the DB query to postgres-main. It also produces a message to Kafka – we could represent that as an internal span (in accounts-service) for sending to Kafka, and a corresponding span in notification-service when it processes that message. (We might link these with a common trace or treat the consumer as a separate trace; but for simplicity, we can keep it in the same trace by propagating context via the queue). Similarly, transactions-service will call risk-service (span) which calls fraud-service. After accounts-service and transactions-service complete, frontend-web would finish the trace.
-Each service will also emit its own metrics (e.g. CPU, memory) and logs. For instance, accounts-service might log “Account data retrieved” at INFO and if an error occurs (as per the error_rate, say an exception connecting to DB), it will log an ERROR with the trace ID. The resource attributes for accounts-service telemetry will include service.name = "accounts-service" and telemetry.sdk.language = "python" (since we marked it as Python) to simulate that a Python SDK produced those
-opentelemetry.io
-.
-The metrics for each service will include generic ones (CPU, memory, request count) and possibly runtime-specific ones. E.g. for the Java service, we could generate metrics like JVM heap usage, GC count, etc.; for Node.js, event loop delay metrics (e.g. nodejs.eventloop.delay.avg and similar
-opentelemetry.io
-); for Go, number of goroutines (go.goroutine.count etc.
-opentelemetry.io
-); for Python, perhaps we simulate something like interpreter CPU time or just stick to system metrics since Python runtime metrics aren’t standardized like others. The idea is to make the telemetry look as if each service was instrumented with its respective language’s OTel SDK which often emits such runtime metrics by default.
-This YAML format might evolve, but it’s a solid starting point. It is human-readable and the LLM can be instructed on how to populate it based on a user’s input (listing services, their counts, etc.).
-LLM System Prompt for Config Generation
-To get the LLM to produce a correct configuration, we will supply a system (or prompt) directive that clearly defines the expected format and content. The LLM should output only the YAML (no extra prose) and follow the schema closely. We will likely provide examples in the prompt to guide it. Key instructions for the LLM (system prompt):
-It should act as a config generator for observability demo scenarios.
-Input will be a user’s description of the scenario (in natural language).
-The output must be a YAML formatted config matching our schema (services, databases, message_queues, telemetry, etc.).
-Define how to derive details from the prompt: e.g. if user says “10 microservices”, the LLM should create 10 entries under services with plausible names and varied languages. If they mention specific technologies (Postgres, Redis), include those in databases. If they mention messaging (Kafka), include in message_queues and use it in connections.
-Encourage the LLM to include realistic touches: for example, if a database is mentioned, ensure some service depends on it; if multiple databases, assign them to different services logically. Also encourage a variety of languages for services if not specified (to showcase multi-language).
-Emphasize format correctness: valid YAML, no commentary, keys in the right structure.
-Here is a draft system prompt example for the LLM:
-System Prompt (for LLM): You are an assistant that generates architecture configuration files for a microservices observability demo tool. The user will describe a hypothetical application (number of services, types of databases, message queues, etc.), and you will produce a YAML configuration representing that scenario. Requirements:
-Output only YAML code (no explanatory text).
-Use the following structure with top-level keys: services, databases, message_queues, telemetry.
-Under services, list each service with name, and if possible assign a language (choose from: python, java, nodejs, go, dotnet, ruby, etc. – use a variety if multiple services) and a depends_on list describing its connections. Use service: X, db: Y, or via queue to denote dependencies.
-Under databases, list any databases mentioned (with name and type). Under message_queues, list any message broker or queue if mentioned (with name and type).
-The telemetry section should include default settings (e.g. trace_rate: 1 (or more if large app), error_rate: 0.0X, metrics_interval: 10s, include_logs: true).
-Ensure every microservice mentioned by the user is included. Create plausible dependencies between services (frontends call backends, backends use databases, etc.) so the scenario is coherent. If the user specifies specific connections, reflect those exactly.
-Maintain valid YAML syntax (use spaces for indentation, no tabs). Do not include any narrative or explanation, only the YAML code.
-Example:
-(If the user says: "I want a simple app with 2 services and a MySQL database"),
-you might output:
-yaml
-Copy
-Edit
+```
+
+### Enhanced Features in Current Implementation
+
+#### Business Operations Modeling
+- **Purpose**: Generate realistic business transaction traces
+- **Example**: E-commerce checkout with payment processing, inventory checks
+- **Benefits**: More meaningful span names, realistic database queries
+
+#### Probabilistic Latency Simulation  
+- **Use Cases**: Simulate database slow queries, network latency spikes
+- **Configuration**: `probability: 0.1` = 10% of operations have elevated latency
+- **Realism**: Models real-world performance variations
+
+#### Example Database Queries
+- **PostgreSQL**: `SELECT * FROM orders WHERE user_id = ? AND status = 'pending'`
+- **MongoDB**: `db.users.find({email: "user@example.com"})`
+- **Redis**: `GET user:session:abc123`
+
+## LLM Integration & System Prompt
+
+### Current OpenAI Integration
+- **Model**: o3 model
+- **Library**: `openai` Python SDK
+- **Authentication**: Environment variable `OPENAI_API_KEY`
+
+### Optimized System Prompt
+```
+You are an expert assistant that generates architecture configuration files for a microservices observability demo tool.
+
+**Requirements:**
+1. Output only YAML code (no explanatory text)
+2. Use top-level keys: services, databases, message_queues, telemetry
+3. For realistic demos, define operations with business logic
+4. Add latency blocks for performance simulation
+5. Include example_queries for database dependencies
+6. Use variety of languages for polyglot simulation
+7. Create coherent dependency relationships
+
+**Performance Simulation Examples:**
+- Slow reporting: latency: {min_ms: 1200, max_ms: 3500}
+- Intermittent slow DB: latency: {min_ms: 50, max_ms: 800, probability: 0.1}
+
+**Output Format**: Valid YAML only, no ```yaml blocks or explanations
+```
+
+### Prompt Engineering Best Practices
+- **Clarity**: Explicit output format requirements
+- **Examples**: Include realistic latency/operation examples  
+- **Constraints**: No prose, only YAML output
+- **Flexibility**: Support for various complexity levels
+
+## Deployment & Development
+
+### Local Development Setup
+```bash
+# Automated startup (recommended)
+./start-local.sh
+
+# Manual startup
+cd backend && uvicorn main:app --reload --port 8000 &
+cd frontend && npm run dev
+```
+
+### Environment Variables
+```bash
+export OPENAI_API_KEY="sk-..."
+export OTEL_COLLECTOR_URL="http://localhost:4318"  # Optional
+```
+
+### Production Deployment Options
+
+#### Docker Compose (Recommended for testing)
+```yaml
 services:
-  - name: serviceA
-    language: python
-    depends_on:
-      - service: serviceB
-      - db: mysql-db
-  - name: serviceB
-    language: java
-    depends_on: []
-databases:
-  - name: mysql-db
-    type: mysql
-message_queues: []
-telemetry:
-  trace_rate: 1
-  error_rate: 0.1
-  metrics_interval: 10s
-  include_logs: true
-(Adjust the content based on the user’s request.)
-When using the LLM, we will input the above as the system or prefix prompt, then the user’s prompt. For example, if the user says: “I want to create a microservices financial services demo, there should be 10 microservices and 2 different databases (Postgres and Redis). There is also a Kafka queue connecting some services.”, the LLM – following our instructions – should enumerate 10 services in YAML, maybe name them like customer-service, account-service, etc., assign languages, list the postgres-db and redis-cache in databases, and include kafka in message_queues and use it in some depends_on (as we did in our example YAML earlier). We will verify the output and possibly have the backend code validate the YAML (e.g. using a JSON schema or simple checks) before proceeding. Ensuring accuracy: The system prompt and perhaps few-shot examples are important because we need the LLM to produce valid and complete configs. We will test this with a few sample prompts. In case the LLM output is not perfect, the backend could perform minor fixes (e.g. if a service references a database not listed, the backend could add it or alert the user). But ideally, the prompt should minimize such issues.
-Telemetry Generation Engine
-With the config in hand, the Python telemetry generator will orchestrate the creation of synthetic telemetry data. This component has several responsibilities:
-Parse Config: Load the YAML config into Python objects (e.g. a dict or custom dataclasses). Identify key elements:
-Build a list of services, a list of databases, etc.
-Construct a mapping of service -> its dependencies (service calls, db uses, queue uses). This essentially is a directed graph of the call topology. It might also be useful to identify which services are “entry points” (those not called by any other service) – those will initiate traces (e.g. typically frontends or edge services).
-Read telemetry settings like trace_rate and error_rate.
-Trace Generation Logic: Simulate distributed traces according to the service graph:
-The generator will create trace spans following the defined service interactions. For each new trace (transaction) to generate:
-Pick an entry-point service (could be round-robin among multiple frontends or just one if only one entry).
-Create a new trace ID (16-byte hex string for OTLP). Start a root span for the entry service (e.g. a span named "HTTP GET /api/..." on a frontend).
-Recursively (or iteratively) traverse its depends_on list to simulate calls. For each dependency:
-If it’s a service call, create a child span for that service. Assign it a new span ID, set its parent span ID to the caller’s span. Also include appropriate attributes:
-e.g. if via HTTP, include attributes like net.peer.name, http.method, etc.; if via gRPC, use rpc.method etc.; if via a queue, perhaps break it into two spans (one for send, one for receive).
-If dependency is a database (db:), simulate a database client span within the service’s span. For example, within accounts-service, create a span for the SQL query to postgres-main. Use semantic conventions for DB spans (attributes like db.system: postgresql, db.name, db.statement if we want to show a query, etc. for realism
-reddit.com
-).
-If dependency is a message queue (via kafka), we can simulate an asynchronous link:
-The sending service (producer) might have a span like “Send to Kafka topic X” and then the consuming service will have a span “Consume from Kafka topic X”. To simulate a realistic trace, we have two options:
-a) We keep them in the same trace: in OTLP you might link them or just treat the consume span as a child of the produce span (though in reality, they might be in different traces if no context propagation, but many tracing systems keep it in one trace for demo simplicity). We can choose to maintain a single trace for the whole flow for easier visualization.
-b) Or simulate separate traces and use the SpanLink to link them. This is advanced and probably not needed for MVP; better to keep one trace for now.
-So we’d create a span in the producing service and then a span in the consumer service and link them parent-child (with perhaps an artificial delay to mimic queue lag).
-Continue this until all dependency chains are covered (depth-first or breadth-first traversal of calls). End spans appropriately (marking end times).
-Optionally, inject delays or durations for spans to simulate processing time (e.g. assign a random duration 5-100ms for normal spans, and maybe longer for database or external calls).
-Decide randomly (based on error_rate) if this trace should contain an error. If so, perhaps pick one span to fail:
-e.g. a database span could have an error (exception, or SQL error), or a service span could return a 500. Mark the span’s status as ERROR and add error attributes (exception.type, exception.message, etc.). Also, log an error message in that service’s logs.
-Once the trace spans are constructed (we’ll have a list of span objects with all necessary fields), wrap them in the OTLP JSON format for traces:
-According to OTLP spec, we need a ResourceSpans object per service (or per resource). However, since each service has distinct resource attributes (service name, language, etc.), we can actually group spans by service in the payload. One trace can be sent in one batch containing multiple ResourceSpans entries – one for each service that participated in the trace. This means the resource section for spans from frontend-web will have service.name = "frontend-web", etc. Within that resource, spans are further grouped by instrumentation scope (we can use a default scope or the service name as the scope name).
-We must ensure the parent-child relationships are preserved via the parentSpanId field on each span
-betterstack.com
-betterstack.com
-. All spans share the same traceId.
-Set span kind appropriately (SERVER for the entry span receiving a request, CLIENT for outgoing calls, CONSUMER/PRODUCER for queue interactions, etc., as per OTel conventions).
-Use unique span IDs (8-byte hex). We can generate random IDs or simple counters in hex.
-Mark status code OK or ERROR on spans based on what happened
-honeycomb.io
-.
-Citing example: The Honeycomb blog provides a minimal JSON for a span with traceId, spanId, parent, name, kind, status, etc.
-honeycomb.io
-honeycomb.io
-. We will follow that structure exactly so the collector accepts it.
-The final JSON for traces will look like an object with resourceSpans: [ ... ] array
-honeycomb.io
-. We’ll likely create one ResourceSpans entry per service per batch. We can send one complete trace in one POST to /v1/traces or accumulate a few traces and send in one batch for efficiency. For simplicity, one trace per POST is fine at first.
-Note: We’ll include resource attributes such as service.name and also set telemetry.sdk.language on each Resource if we want to mimic the SDK identity (e.g. “python”, “java”)
-cncf.io
-. These attributes will make it appear in the backend as if different SDKs sent the data (which addresses the concern of not using a single SDK instance).
-Log Generation Logic: Simulate application logs from each service:
-Each service can have its own logging pattern. A simple approach: For each span or each significant operation, generate a log entry. For example, when accounts-service handles a request (span), we create a log like “Handled request for account X” at INFO level. If an error occurs in that span, also log an ERROR with the exception message.
-We ensure logs carry the trace and span IDs for correlation: the OTLP LogRecord allows traceId and spanId fields
-betterstack.com
-. We will populate those so that the logs can be correlated to traces in the observability backend.
-We also attach severityText (INFO, ERROR, etc.) and any relevant attributes. For instance, we might add attributes like logger.name or other contextual info if desired.
-Logs will be grouped in OTLP JSON under resourceLogs similar to traces
-betterstack.com
-. Each service will have its Resource with service.name attribute, then one or more LogRecords. We could send logs in batches periodically (e.g. every second, send recent logs).
-Example of an OTLP log JSON: it will have timeUnixNano, severityNumber/Text, body with the log message, and the traceId/spanId if correlating
-betterstack.com
-.
-Realism: We can vary log levels (mostly INFO, some DEBUG maybe, and some ERROR on failures). Also maybe include one log entry that contains a stack trace or error details when an error occurs.
-Metric Generation Logic: Simulate metrics for each service (and possibly for other components like the databases or the queue if we want):
-Each service will be represented as a ResourceMetrics in OTLP (with service.name attribute). Under it, we have scopeMetrics and then a list of Metric data.
-We should produce a few metrics per service:
-CPU usage (Gauge): e.g. simulate CPU percent or CPU time. For a realistic feel, maybe have a base value and fluctuate it. Not all services equal – maybe frontend has higher CPU usage etc.
-Memory usage (Gauge): e.g. heap memory used.
-Request rate or throughput (Sum or Counter): e.g. a counter metric for number of requests processed, incrementing.
-Error count (Sum): could increment when errors occur.
-Latency (Histogram): We could simulate a histogram of request durations for each service. This is more complex to formulate in OTLP JSON (buckets, counts) but could be done.
-Runtime-specific metrics: As discussed, if language is Java, simulate JVM GC count or GC pause time metrics; if Node.js, simulate event loop lag/utilization metrics
-opentelemetry.io
-; if Go, goroutine count, heap size metrics
-opentelemetry.io
-; etc. We might include 1-2 of these per service to showcase depth. For instance, a Java service’s resource metrics could include a metric named runtime.jvm.gc.collection_count (just as an example) that increments periodically, or runtime.jvm.memory.used gauge
-opentelemetry.io
-. A Go service can have go.goroutine.count gauge
-opentelemetry.io
-. We can hardcode some typical metric names and have the generator assign random values within realistic ranges.
-Metrics will be emitted on a schedule (e.g. every 10 seconds as per telemetry.metrics_interval). Each interval, generate the latest values and POST to /v1/metrics.
-OTLP metrics JSON format: it’s a bit verbose. We’ll have something like:
-json
-Copy
-Edit
-{
-  "resourceMetrics": [ {
-     "resource": { "attributes": [ { "key": "service.name", "value": {"stringValue": "accounts-service"} }, ... ] },
-     "scopeMetrics": [ {
-        "metrics": [ 
-          { "name": "cpu.utilization", "unit": "%", "description": "CPU Usage", "gauge": { "dataPoints": [ { "timeUnixNano": "...", "asDouble": 42.5 } ] } },
-          { "name": "go.goroutine.count", "description": "Number of goroutines", "gauge": { "dataPoints": [ { "asInt": 50 } ] } },
-          { "name": "requests.count", "description": "Total requests processed", "sum": { "isMonotonic": true, "dataPoints": [ { "asInt": 1000 } ] } }
-        ]
-     } ]
-  }, ... ]
+  backend:
+    build: ./backend
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    ports:
+      - "8000:8000"
+  
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+  
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    ports:
+      - "4318:4318"  # OTLP HTTP
+```
+
+#### Kubernetes Deployment
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-demo-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-demo-backend
+  template:
+    spec:
+      containers:
+      - name: backend
+        image: otel-demo-backend:latest
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-secret
+              key: api-key
+```
+
+## Technical Implementation Details
+
+### FastAPI Backend Architecture
+
+#### Global State Management
+```python
+# Global generator instance for singleton pattern
+generator_instance: Optional[TelemetryGenerator] = None
+
+# Thread-safe start/stop operations
+async def start_generation(request: StartRequest):
+    global generator_instance
+    if generator_instance and generator_instance.is_running():
+        raise HTTPException(status_code=400, detail="Already running")
+```
+
+#### CORS Configuration
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+### Telemetry Generation Engine Details
+
+#### Service Graph Traversal
+```python
+def _generate_span_recursive(
+    self,
+    service_name: str,
+    parent_span_id: str | None,
+    trace_id: str,
+    spans_by_service: Dict[str, List[Dict[str, Any]]],
+    start_time_ns: int,
+    error_source: str | None,
+    trigger_kind: str,
+    visited_services: set,
+    recursion_depth: int
+) -> Tuple[int, bool]:
+```
+
+#### Runtime-Specific Metrics Generation
+```python
+# Java JVM metrics
+if lang == "java":
+    metrics.append(self._create_sum_metric(
+        "jvm.gc.collection_count", "collections", True, [...]
+    ))
+
+# Go runtime metrics  
+elif lang == "go":
+    metrics.append(self._create_gauge_metric(
+        "go.goroutines", "goroutines", [...]
+    ))
+
+# Node.js event loop metrics
+elif lang == "nodejs":
+    metrics.append(self._create_gauge_metric(
+        "nodejs.eventloop.delay.avg", "ms", [...]
+    ))
+```
+
+#### Resource Attribute Generation
+```python
+def _generate_resource_attributes(self, service: Service) -> Dict[str, Any]:
+    return {
+        "service.name": service.name,
+        "service.namespace": "otel-demo-gen",
+        "service.version": "1.2.3",
+        "service.instance.id": f"{service.name}-{secrets.token_hex(6)}",
+        "telemetry.sdk.language": service.language,
+        "cloud.provider": "aws",
+        "cloud.region": "us-west-2",
+        "deployment.environment": "production",
+        "host.name": f"{service.name}-{secrets.token_hex(2)}",
+    }
+```
+
+### Frontend React Architecture
+
+#### Component Responsibilities
+- **App.jsx**: Main state management, API coordination
+- **ScenarioForm.jsx**: Natural language input, form validation  
+- **ConfigDisplay.jsx**: YAML syntax highlighting, editing
+- **Controls.jsx**: Start/stop buttons, status management
+- **StatusBar.jsx**: Real-time generation statistics
+
+#### State Management Pattern
+```javascript
+const [scenario, setScenario] = useState('');
+const [config, setConfig] = useState(null);
+const [isGenerating, setIsGenerating] = useState(false);
+const [generatorStatus, setGeneratorStatus] = useState({running: false});
+```
+
+## Advanced Features & Realism Enhancements
+
+### Error Injection Strategies
+1. **Random Service Failures**: HTTP 500 responses, exceptions
+2. **Database Timeouts**: Simulated connection failures
+3. **Network Latency**: Variable response times
+4. **Cascade Failures**: Errors propagating through service chains
+
+### Performance Pattern Simulation
+1. **N+1 Database Queries**: Multiple sequential DB calls per request
+2. **Memory Leaks**: Gradually increasing memory metrics
+3. **GC Pressure**: Elevated garbage collection metrics (Java)
+4. **Event Loop Blocking**: High event loop delay (Node.js)
+
+### Semantic Conventions Compliance
+- **HTTP Spans**: `http.method`, `http.status_code`, `http.url`
+- **Database Spans**: `db.system`, `db.name`, `db.statement`
+- **Messaging Spans**: `messaging.system`, `messaging.destination`
+- **RPC Spans**: `rpc.service`, `rpc.method`
+
+### Multi-Language Runtime Behaviors
+```python
+RUNTIME_INFO = {
+    "python": {"name": "CPython", "version": "3.11.5"},
+    "java": {"name": "OpenJDK Runtime Environment", "version": "17.0.5"},
+    "nodejs": {"name": "node.js", "version": "18.12.1"},
+    "go": {"name": "go", "version": "1.21.0"},
+    "ruby": {"name": "ruby", "version": "3.2.2"},
+    "dotnet": {"name": ".NET", "version": "7.0.0"},
 }
-(This is an illustration combining types; actual formatting will follow OTLP spec exactly
-betterstack.com
-betterstack.com
-.)
-We will likely generate simpler metric types first (Gauge for current values, Sum for cumulative counts). The Better Stack article shows an example of a gauge metric in OTLP JSON
-betterstack.com
-betterstack.com
- which we can emulate.
-If the user’s scenario mentions specific metrics or KPI (not likely; most will just mention architecture), we can ignore that. But the user might mention “simulate high CPU usage on service X” – in which case the LLM could reflect that in the YAML (perhaps as an annotation), or we might handle it manually. Possibly out-of-scope for initial version unless we extend YAML to allow such hints per service (e.g. a service could have an attribute workload: high and we translate that to higher metrics).
-Data Transmission: The generator will send the data to the Collector’s OTLP receiver:
-Trace data: via HTTP POST to http://collector:4318/v1/traces with Content-Type: application/json. The payload is the TracesData JSON containing the spans
-honeycomb.io
-. We must ensure this JSON adheres to the OTLP schema (the Honeycomb example
-honeycomb.io
- is minimal but valid; we will include all necessary fields like traceId, spanId, etc.).
-Log data: POST to /v1/logs with LogsData JSON structure (resourceLogs, scopeLogs, logRecords)
-betterstack.com
-betterstack.com
-.
-Metric data: POST to /v1/metrics with MetricsData JSON (resourceMetrics, scopeMetrics, metrics)
-betterstack.com
-betterstack.com
-.
-The Collector, upon receiving these, will treat them as incoming telemetry from services. As long as our JSON matches OTLP spec, it will be accepted. We have references to the OTLP JSON schema and examples
-honeycomb.io
-betterstack.com
- to guide our implementation.
-If using gRPC was preferred, we’d need protobuf serialization which is more complex in Python (requires protos and perhaps not worth it for MVP). JSON over HTTP is easier to implement and OTLP/HTTP supports JSON encoding as of spec (stable for metrics/logs and in dev for traces)
-betterstack.com
-. We’ll stick to JSON encoding for readability and ease, as requested.
-Continuous Running & Control: The generator will likely run as a loop:
-A trace generation loop that every (1/trace_rate) seconds creates a new trace.
-A metrics loop that every metrics_interval sends updated metrics.
-A logs loop could either be tied to traces (e.g. generate logs during trace generation), and perhaps also generate periodic background logs (like a service might log a periodic status message).
-We will make the generation configurable at runtime. Possibly the backend exposes an API to start/stop the simulation. The front end can let the user start the demo after reviewing the config. The backend could also allow adjusting the rate on the fly.
-If running in Kubernetes, we might scale the generator or have multiple generator pods if extremely high load is needed, but MVP likely just one instance is fine.
-Validation: It’s important to test the output by feeding it to a Collector and viewing in the backend (Elastic or Jaeger, etc.). We should validate:
-Spans show up with proper service names and are linked into traces.
-Metrics appear and have correct service attribution.
-Logs are correlated with trace IDs.
-If issues, adjust the JSON formatting accordingly.
-By implementing the above, the Telemetry Generator will effectively mimic a multi-service system. We will be able to demonstrate, for example, in a trace UI: a distributed trace with spans from services frontend -> accounts-service -> postgres, accounts-service -> Kafka -> notification-service -> email-service, etc., all with their respective languages and timing. Logs will be viewable and linked to those traces (e.g. clicking on an error span shows the error log). Metrics dashboards can show each service’s CPU, memory, and runtime metrics, reflecting the “load” on each. It’s worth noting that not using the official SDK is what enables us to inject this flexibility. By manually constructing OTLP payloads, each service’s telemetry can carry distinct identifiers and characteristics, as if they were separate processes. This approach is similar to what some telemetry test tools do – they act as an “exporter” that generates data without instrumenting real code
-github.com
-. It allows full control over the data being sent (we know exactly what traces and metrics are produced, and can tweak easily via config, without running actual apps).
-Realism and Enhancements
-To truly make the demo convincing and useful, we incorporate several realism features:
-Multi-Language Simulation: As mentioned, we tag data with different languages and simulate their typical metrics. This makes the demo environment look like a polyglot microservice system (which is common in real organizations). For example, one service’s resource might report telemetry.sdk.language = "java" while another says "nodejs", etc., and even service.instance.id could be faked if we wanted multiple instances. The official OpenTelemetry Demo follows a similar approach by having microservices in different languages
-opentelemetry.io
-, and we replicate that effect virtually.
-Semantic Conventions: We’ll use realistic attribute keys in spans (e.g. http.method, http.status_code, db.statement, messaging.system for Kafka, etc.) according to OpenTelemetry semantic conventions. This way, any tooling or backend that recognizes these will treat the data normally (for instance, Elastic might group spans by HTTP method, etc.). It also makes the trace more informative to someone reading it.
-Error and Anomaly Injection: Controlled by error_rate and potentially other parameters, we’ll introduce errors such as:
-HTTP 500s or exceptions in certain spans.
-Database timeouts or errors.
-Message queue delays or drops (maybe simulate a message delay causing a timeout).
-These allow the demo user to see how such issues appear in traces (e.g. a span marked with error and a stack trace attribute) and logs (error logs emitted). They can then use their observability tools to practice root cause analysis on the fake data.
-Variable Load and Performance: We can simulate bursts of traffic or uneven load. For simplicity, trace_rate might be constant, but we could enhance by occasionally varying it or allowing the user to specify patterns (like “spike at noon”). Similarly, metrics like CPU could suddenly jump on one service (maybe simulating a CPU leak or heavy computation) and then go down, etc. This can show off alerting or autoscaling in a full demo scenario. While not in the basic YAML, we could script simple sinusoidal or random variation.
-Patterns (Advanced): In future, we might allow specifying common problematic patterns like:
-N+1 Query: e.g. the accounts-service, for each request, queries the database in a loop 5 times (instead of one batched query). This would show up as multiple sequential DB spans under one service call. This pattern is often shown in demos to identify inefficient queries. We could implement this if needed by simply generating multiple DB child spans in a loop for one service span.
-High Cardinality: e.g. generate metrics with high-cardinality labels (to demonstrate how systems handle that).
-Dependency failures: e.g. one service is down – we simulate it by making spans to it fail or timing out.
-These are not in MVP explicitly, but our architecture would allow adding these once we have the basic generation in place (it might be as easy as adding a config flag or adjusting the generation logic).
-Time Synchronization: Ensure that time stamps of spans and logs make sense (spans should have start and end times that align, logs timestamps fall within the span times, etc.). We can use current time as a base or start at an arbitrary epoch. Typically, using real current time is fine so that the data appears “now” in the backend.
-Resource Utilization: Because this is synthetic, we should be careful about volume. A high trace_rate with many spans each could overwhelm the backend. We’ll default to modest rates but allow tuning. Perhaps also allow limiting duration (like run for N minutes then stop) to avoid unbounded growth of stored data – or simply document that user should stop it.
-Testing and Validation: We will test the output using known OTLP inspection tools or by sending to a test backend. There are known tools (like otel-collector’s file exporter, or even the otelgen utility) that we can reference to verify our data format. The Reddit thread pointed out similar tools (Cisco’s test-telemetry-generator which uses YAML, and an app-simulator for microservices)
-reddit.com
- – those validate that our approach is feasible. In fact, the test-telemetry-generator’s use of YAML to specify telemetry is exactly what we’re doing
-github.com
-, and the app-simulator’s goal of simulating interacting services via declarative config is aligned with our design
-reddit.com
-. The difference is our use of an LLM to create that config, making it even more user-friendly.
-In summary, the telemetry generator will produce data nearly indistinguishable from a real instrumented microservice system. This provides a powerful demo: users can see trace graphs, log events, and metric charts in their observability tool as if a complex microservice app were running, all generated on-demand by AI. It removes the need to deploy actual demo apps (no resource-heavy microservice cluster needed) – a big win for testing and demos.
-Sample YAML and LLM Prompt Recap
-(We provided a detailed example YAML in the earlier section, which serves as a template for what the LLM should output. We also drafted a system prompt for the LLM. Here we recap them in one place for clarity.)
-YAML Config Example – demonstrates how to define services, dependencies, databases, message queues, and telemetry settings for a 10-service scenario (online banking). This example can be adjusted per user input. It is important that the LLM sticks to this structure. Refer back to the YAML snippet above for the format. The key is that each service is listed and connections are encoded through depends_on.
-LLM System Prompt – instructs the LLM to output only the YAML and describes the format. It is crucial to include guidelines like “do not include explanation, just YAML” because many LLMs otherwise include prose. The prompt also lists how to use the user’s info (number of services, types of DBs, etc.) to fill out the config. Including an example in the prompt (as we did with a simple 2-service scenario) will help the LLM understand the task and output. We should ensure the example doesn’t conflict with the user’s request but is clearly just an illustration.
-Example user prompt (that the frontend might send to backend/LLM): “I want to create a microservices financial services demo with 10 microservices and 2 databases (Postgres and Redis). Include a Kafka message queue connecting some services.” Expected LLM output: A YAML listing 10 services (likely it will come up with names like payment-service, user-service, etc. relevant to financial domain if not specified), two databases (postgres, redis), and one Kafka in message_queues, plus the telemetry settings. We will verify this and maybe have a step for the user to approve or tweak the config if needed before generation starts.
-Project Structure and Development Steps
-Organizing the project clearly will help in development and maintenance. Here’s a recommended structure:
-bash
-Copy
-Edit
-ai-demo-generator/
-├── backend/
-│   ├── main.py              # Entrypoint for the Python backend server (FastAPI/Flask app)
-│   ├── generator.py         # Module containing telemetry generation logic
-│   ├── llm_config_gen.py    # Module for interacting with LLM and generating YAML
-│   ├── config_schema.py     # (Optional) Defines data classes or schema for the YAML config
-│   ├── sample_configs/      # (Optional) Directory with example YAML configs for testing
-│   └── requirements.txt     # Python dependencies (FastAPI, PyYAML, requests, etc.)
-├── frontend/
-│   ├── src/...              # React app source code (components, pages)
-│   ├── public/...
-│   └── package.json         # Frontend dependencies
-├── otel-collector/
-│   └── collector-config.yaml # (Optional) An OTel Collector config for demo (receivers, exporters)
-├── docker-compose.yaml      # For running backend + frontend + collector together
-├── k8s-manifests/           # Kubernetes YAMLs (Deployment/Service for backend, frontend, collector)
-└── README.md                # Developer guide and usage instructions
-Explanation:
-The backend directory holds the Python code. We separate concerns by files: llm_config_gen.py deals with calling the OpenAI API and formatting the prompts (it can also contain the system prompt text or load it from a file). generator.py will have the logic to convert a config (passed as Python objects) into telemetry data and send it out. main.py ties it together, exposing API endpoints (e.g. /generate_config and /start_demo etc.) using a web framework.
-The frontend directory contains the Node/React app. If using Next.js, it will have pages for the UI; or if a CRA, then components. The UI will likely have a form or a simple interface to send the prompt and display the YAML result. We may also use a code editor component to show YAML nicely (optional).
-The otel-collector directory could contain a sample configuration for the OpenTelemetry Collector. For example, a config that has an OTLP receiver on 4318 and an exporter to logging or to an Elastic APM endpoint. This helps users set up the collector easily. We can provide Docker instructions or k8s manifests for the collector as well.
-docker-compose.yaml will allow one-command startup of the whole system (except the LLM which is an external service). We could use the official Otel Collector Docker image with our config.
-k8s-manifests: if targeting Kubernetes, we write manifests. Possibly use a Helm chart for flexibility, but plain manifests might suffice for now. These would include Deployment for backend (with env for OpenAI key, config for collector URL), Deployment for frontend (maybe served via Node or as static on an nginx), Service objects for them, and a Deployment + Service for the Collector (with config mounted or provided via configmap).
-The README.md will document how to run the tool, how to use the UI, etc., which is important if others are going to try it.
+```
+
+## Extension Points & Future Enhancements
+
+### Planned Features
+- **Custom Metric Definitions**: User-defined business metrics
+- **Service Mesh Simulation**: Istio/Envoy proxy traces  
+- **Time-Based Patterns**: Load spikes, scheduled jobs
+- **Topology Visualization**: Interactive service dependency graphs
+- **Configuration Templates**: Pre-built scenarios (e-commerce, banking, etc.)
+
+### API Extensions
+- **POST /templates**: Get pre-defined scenario templates
+- **POST /validate**: Validate YAML configuration
+- **GET /metrics**: Generator performance metrics
+- **WebSocket /status**: Real-time status streaming
+
+### Integration Opportunities  
+- **Grafana Dashboards**: Auto-generated dashboards for scenarios
+- **Alert Rule Generation**: Synthetic alert conditions
+- **Load Testing Integration**: k6, Artillery scenario generation
+- **CI/CD Integration**: Observability testing in pipelines
+
+## Troubleshooting Guide
+
+### Common Issues
+
+#### Generator Won't Start
+```bash
+# Check OpenAI API key
+echo $OPENAI_API_KEY
+
+# Verify collector endpoint
+curl http://localhost:4318/v1/traces
+
+# Check backend logs
+cd backend && uvicorn main:app --reload --log-level debug
+```
+
+#### No Telemetry in Backend
+```bash
+# Verify OTLP endpoint configuration
+curl -X POST http://localhost:8000/status
+
+# Check collector configuration
+docker logs otel-collector
+
+# Validate YAML configuration
+python -c "import yaml; yaml.safe_load(open('config.yaml'))"
+```
+
+#### Frontend Build Issues
+```bash
+# Clear node modules and reinstall
+cd frontend && rm -rf node_modules package-lock.json
+npm install
+
+# Update dependencies
+npm update
+```
+
+### Performance Tuning
+
+#### High CPU Usage
+- Reduce `trace_rate` in telemetry configuration  
+- Decrease `metrics_interval` frequency
+- Lower service count in complex scenarios
+
+#### Memory Issues
+- Monitor generator thread lifecycle
+- Implement payload batching for high-volume scenarios
+- Use connection pooling for OTLP endpoints
+
+## Contributing Guidelines
+
+### Code Structure Standards
+- **Backend**: Type hints, docstrings, Pydantic validation
+- **Frontend**: Functional components, PropTypes, error boundaries  
+- **Configuration**: YAML schema validation, example configurations
+- **Testing**: Unit tests for telemetry generation, integration tests for API
+
+### Development Workflow
+1. **Feature Branch**: Create from main
+2. **Implementation**: Follow existing patterns
+3. **Testing**: Verify telemetry output manually
+4. **Documentation**: Update architecture guide
+5. **Pull Request**: Include example scenarios
+
+This architecture document serves as the definitive reference for understanding, extending, and deploying the AI-Powered Observability Demo Generator. All implementation details are current as of the latest codebase state.

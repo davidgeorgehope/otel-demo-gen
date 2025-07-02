@@ -7,9 +7,11 @@ import requests
 import json
 import httpx
 import yaml
+import uuid
 from typing import Dict, List, Any, Tuple, Union, Optional
+from datetime import datetime, timezone
 
-from config_schema import ScenarioConfig, Service, ServiceDependency, DbDependency, CacheDependency, LatencyConfig, Operation
+from config_schema import ScenarioConfig, Service, ServiceDependency, DbDependency, CacheDependency, LatencyConfig, Operation, BusinessDataField
 
 
 class TelemetryGenerator:
@@ -52,6 +54,7 @@ class TelemetryGenerator:
         self.api_key = api_key
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._k8s_thread: Optional[threading.Thread] = None  # New: K8s metrics thread
         
         self.headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -63,7 +66,10 @@ class TelemetryGenerator:
         self.db_map = {db.name: db for db in self.config.databases}
         self.mq_map = {mq.name: mq for mq in self.config.message_queues}
         
-        # Pre-generate resource attributes for each service
+        # Initialize K8s pod data FIRST (needed for resource attributes)
+        self._k8s_pod_data = self._initialize_k8s_pod_data()
+        
+        # Pre-generate resource attributes for each service (after k8s data is ready)
         self.service_resource_attributes = {
             s.name: self._generate_resource_attributes(s) for s in self.config.services
         }
@@ -84,27 +90,617 @@ class TelemetryGenerator:
         self._error_counters = {s.name: 0 for s in self.config.services}
         self._runtime_counters = {s.name: 0 for s in self.config.services}
 
+        # K8s-specific counters
+        self._k8s_counters = {
+            s.name: {
+                'network_rx_bytes': random.randint(50000000, 100000000),
+                'network_tx_bytes': random.randint(70000000, 120000000),
+                'restart_count': 0
+            } for s in self.config.services
+        }
+
+    def _initialize_k8s_pod_data(self) -> Dict[str, Dict[str, Any]]:
+        """Initialize static k8s pod data for each service."""
+        cluster_name = f"otel-demo-cluster-{secrets.token_hex(3)}"
+        node_names = [f"gke-{cluster_name}-pool-{i}-{secrets.token_hex(4)}" for i in range(1, 4)]
+        
+        pod_data = {}
+        for service in self.config.services:
+            pod_name = f"{service.name}-{secrets.token_hex(4)}-{secrets.token_hex(3)}"
+            node_name = secrets.choice(node_names)
+            
+            # Generate realistic pod start time (within last 7 days)
+            start_time_offset = random.randint(0, 7 * 24 * 3600)  # 0-7 days ago
+            start_time = datetime.now(timezone.utc).timestamp() - start_time_offset
+            
+            pod_data[service.name] = {
+                'pod_name': pod_name,
+                'pod_uid': str(uuid.uuid4()),
+                'pod_ip': f"10.{random.randint(100, 120)}.{random.randint(1, 10)}.{random.randint(2, 250)}",
+                'pod_start_time': datetime.fromtimestamp(start_time, timezone.utc).isoformat().replace('+00:00', 'Z'),
+                'namespace': random.choice(['default', 'production', 'staging', f'{service.name}-ns']),
+                'node_name': node_name,
+                'cluster_name': cluster_name,
+                'deployment_name': f"{service.name}-deployment",
+                'replicaset_name': f"{service.name}-{secrets.token_hex(4)}",
+                'host_ip': f"10.128.{random.randint(10, 50)}.{random.randint(100, 200)}",
+                'zone': random.choice(['us-central1-a', 'us-central1-b', 'us-central1-c']),
+            }
+        
+        return pod_data
+
+    def _generate_k8s_resource_attributes(self, service: Service) -> Dict[str, Any]:
+        """Generate k8s-specific resource attributes matching OTEL collector expectations."""
+        pod_data = self._k8s_pod_data[service.name]
+        
+        # Core k8s attributes that the k8sattributes processor expects
+        # These MUST match the extract.metadata configuration in the collector
+        k8s_attributes = {
+            "k8s.namespace.name": pod_data['namespace'],
+            "k8s.deployment.name": pod_data['deployment_name'],
+            "k8s.replicaset.name": pod_data['replicaset_name'],
+            "k8s.node.name": pod_data['node_name'],
+            "k8s.pod.name": pod_data['pod_name'],
+            "k8s.pod.ip": pod_data['pod_ip'],
+            "k8s.pod.uid": pod_data['pod_uid'],
+            "k8s.pod.start_time": pod_data['pod_start_time'],
+            "k8s.cluster.name": pod_data['cluster_name'],  # Expected by resource detection processors
+        }
+        
+        # Service attributes - these are critical for APM integration
+        service_attributes = {
+            "service.name": service.name,
+            "service.version": "1.2.3",
+            "service.namespace": pod_data['namespace'],
+            "service.instance.id": f"{service.name}-{pod_data['pod_name']}",
+        }
+        
+        # Host attributes for resource detection processor compatibility
+        host_attributes = {
+            "host.name": pod_data['node_name'],
+            "host.id": str(random.randint(6000000000000000000, 7000000000000000000)),
+            "host.ip": pod_data['host_ip'],  # Single IP, not array
+            "host.architecture": "amd64",
+            "os.type": "linux",
+        }
+        
+        # Cloud provider attributes for resource detection
+        cloud_attributes = {
+            "cloud.provider": "gcp",
+            "cloud.region": "us-central1",
+            "cloud.availability_zone": pod_data['zone'],
+            "cloud.account.id": "otel-demo-project",
+            "cloud.instance.id": str(random.randint(6000000000000000000, 7000000000000000000)),
+        }
+        
+        # Telemetry SDK attributes
+        telemetry_attributes = {
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.language": service.language,
+            "telemetry.sdk.version": "1.24.0"
+        }
+        
+        # Combine all attributes with k8s attributes taking precedence
+        return {
+            **host_attributes,
+            **cloud_attributes,
+            **telemetry_attributes,
+            **service_attributes,
+            **k8s_attributes,  # These should come last to override any conflicts
+        }
+
+    def _generate_k8s_telemetry(self):
+        """The main loop for the k8s metrics generator thread."""
+        # For demo purposes, send K8s metrics more frequently
+        k8s_metrics_interval = 10  # Send every 10 seconds instead of 30
+        
+        print("Kubernetes metrics generation loop started.")
+        while not self._stop_event.is_set():
+            self.generate_and_send_k8s_metrics()
+            self.generate_and_send_k8s_events()  # Also send K8s events
+            
+            # Wait for the interval or until stop event is set
+            self._stop_event.wait(k8s_metrics_interval)
+        
+        print("Kubernetes metrics generation loop finished.")
+
+    def generate_and_send_k8s_metrics(self):
+        """Generates and sends Kubernetes pod metrics."""
+        if not self.collector_url:
+            print("Warning: OTLP endpoint not configured. Cannot send k8s metrics.")
+            return
+            
+        k8s_metrics_payload = self.generate_k8s_metrics_payload()
+        if k8s_metrics_payload.get("resourceMetrics"):
+            self._send_payload(f"{self.collector_url}v1/metrics", k8s_metrics_payload, "k8s-metrics")
+
+    def generate_and_send_k8s_events(self):
+        """Generates and sends Kubernetes event logs."""
+        if not self.collector_url:
+            print("Warning: OTLP endpoint not configured. Cannot send k8s events.")
+            return
+            
+        # Generate events occasionally (not every cycle to avoid spam)
+        if random.random() < 0.3:  # 30% chance per cycle
+            k8s_events_payload = self.generate_k8s_events_payload()
+            if k8s_events_payload.get("resourceLogs"):
+                self._send_payload(f"{self.collector_url}v1/logs", k8s_events_payload, "k8s-events")
+
+    def generate_k8s_metrics_payload(self) -> Dict[str, List[Any]]:
+        """Generate comprehensive OTLP metrics payload for Kubernetes resources."""
+        resource_metrics = []
+        current_time_ns = str(time.time_ns())
+        
+        # Generate pod metrics for each service
+        for service in self.config.services:
+            k8s_counters = self._k8s_counters[service.name]
+            
+            # Update network counters with realistic increments
+            k8s_counters['network_rx_bytes'] += random.randint(10000, 100000)
+            k8s_counters['network_tx_bytes'] += random.randint(15000, 120000)
+            
+            # Occasionally simulate pod restarts
+            if random.random() < 0.002:  # 0.2% chance (increased for demo)
+                k8s_counters['restart_count'] += 1
+            
+            # POD-LEVEL METRICS
+            pod_metrics = []
+            
+            # Pod CPU usage metrics
+            pod_metrics.append(self._create_gauge_metric(
+                "k8s.pod.cpu.usage", 
+                "ns", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(100000000, 2000000000))
+                }]
+            ))
+            
+            pod_metrics.append(self._create_gauge_metric(
+                "k8s.pod.cpu_limit_utilization", 
+                "1", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asDouble": random.uniform(0.05, 0.85)
+                }]
+            ))
+            
+            pod_metrics.append(self._create_gauge_metric(
+                "k8s.pod.cpu.node.utilization", 
+                "1", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asDouble": random.uniform(0.01, 0.15)
+                }]
+            ))
+            
+            # Pod memory usage metrics
+            pod_metrics.append(self._create_gauge_metric(
+                "k8s.pod.memory.usage", 
+                "By", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(100000000, 800000000))
+                }]
+            ))
+            
+            pod_metrics.append(self._create_gauge_metric(
+                "k8s.pod.memory_limit_utilization", 
+                "1", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asDouble": random.uniform(0.1, 0.7)
+                }]
+            ))
+            
+            pod_metrics.append(self._create_gauge_metric(
+                "k8s.pod.memory.node.utilization", 
+                "1", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asDouble": random.uniform(0.001, 0.05)
+                }]
+            ))
+            
+            # Pod network metrics
+            pod_metrics.append(self._create_sum_metric(
+                "k8s.pod.network.rx", 
+                "By", 
+                True, 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(k8s_counters['network_rx_bytes'])
+                }]
+            ))
+            
+            pod_metrics.append(self._create_sum_metric(
+                "k8s.pod.network.tx", 
+                "By", 
+                True, 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(k8s_counters['network_tx_bytes'])
+                }]
+            ))
+            
+            # Pod filesystem usage
+            pod_metrics.append(self._create_gauge_metric(
+                "k8s.pod.filesystem.usage", 
+                "By", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(100000000, 500000000))
+                }]
+            ))
+            
+            # CONTAINER-LEVEL METRICS (missing from original)
+            container_id = f"containerd://{secrets.token_hex(32)}"
+            
+            # Container CPU limit and request metrics
+            pod_metrics.append({
+                "name": "k8s.container.cpu_limit",
+                "unit": "1",
+                "gauge": {
+                    "dataPoints": [{
+                        "timeUnixNano": current_time_ns,
+                        "asDouble": random.uniform(0.5, 2.0),
+                        "attributes": [
+                            {"key": "container.name", "value": {"stringValue": f"{service.name}-container"}},
+                            {"key": "container.id", "value": {"stringValue": container_id}}
+                        ]
+                    }]
+                }
+            })
+            
+            pod_metrics.append({
+                "name": "k8s.container.cpu_request",
+                "unit": "1", 
+                "gauge": {
+                    "dataPoints": [{
+                        "timeUnixNano": current_time_ns,
+                        "asDouble": random.uniform(0.1, 1.0),
+                        "attributes": [
+                            {"key": "container.name", "value": {"stringValue": f"{service.name}-container"}},
+                            {"key": "container.id", "value": {"stringValue": container_id}}
+                        ]
+                    }]
+                }
+            })
+            
+            # Container termination reason (for restart analysis)
+            termination_reasons = ["Completed", "Error", "OOMKilled", "ContainerCannotRun"]
+            if random.random() < 0.05:  # 5% chance of termination
+                reason = secrets.choice(termination_reasons)
+                pod_metrics.append({
+                    "name": "k8s.container.status.last_terminated_reason",
+                    "unit": "1",
+                    "gauge": {
+                        "dataPoints": [{
+                            "timeUnixNano": current_time_ns,
+                            "asInt": "1",
+                            "attributes": [
+                                {"key": "container.name", "value": {"stringValue": f"{service.name}-container"}},
+                                {"key": "k8s.container.status.last_terminated_reason", "value": {"stringValue": reason}}
+                            ]
+                        }]
+                    }
+                })
+            
+            # Container restart metrics with reasons
+            restart_reasons = ["CrashLoopBackOff", "OOMKilled", "Error", "Completed"]
+            for reason in restart_reasons:
+                restart_count = 1 if random.random() < 0.001 else 0
+                if restart_count > 0:  # Only add if there's actually a restart
+                    pod_metrics.append({
+                        "name": "k8s.container.restarts",
+                        "unit": "1",
+                        "sum": {
+                            "isMonotonic": True,
+                            "aggregationTemporality": 2,
+                            "dataPoints": [{
+                                "timeUnixNano": current_time_ns,
+                                "asInt": str(restart_count),
+                                "attributes": [
+                                    {"key": "container.name", "value": {"stringValue": f"{service.name}-container"}},
+                                    {"key": "container.id", "value": {"stringValue": container_id}},
+                                    {"key": "k8s.container.restart_reason", "value": {"stringValue": reason}}
+                                ]
+                            }]
+                        }
+                    })
+            
+            # Pod status metrics  
+            pod_status_reasons = ["Running", "Pending", "Succeeded", "Failed"]
+            for reason in pod_status_reasons:
+                status_count = 1 if reason == "Running" else (1 if random.random() < 0.1 else 0)
+                if status_count > 0:  # Only add if status is active
+                    pod_metrics.append({
+                        "name": "k8s.pod.status_reason",
+                        "unit": "1", 
+                        "gauge": {
+                            "dataPoints": [{
+                                "timeUnixNano": current_time_ns,
+                                "asInt": str(status_count),
+                                "attributes": [
+                                    {"key": "k8s.pod.status_reason", "value": {"stringValue": reason}}
+                                ]
+                            }]
+                        }
+                    })
+            
+            # Create pod resource metrics with container attributes
+            pod_resource_attrs = self._format_attributes({
+                **self._generate_k8s_resource_attributes(service),
+                "container.id": container_id,  # Add container ID to resource attributes
+                "k8s.container.name": f"{service.name}-container"
+            })
+            
+            resource_metrics.append({
+                "resource": {"attributes": pod_resource_attrs},
+                "scopeMetrics": [{
+                    "scope": {
+                        "name": "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kubeletstatsreceiver", 
+                        "version": "1.0.0"
+                    }, 
+                    "metrics": pod_metrics
+                }]
+            })
+        
+        # Generate cluster-level metrics (one set per cluster)
+        cluster_metrics = self._generate_cluster_level_metrics(current_time_ns)
+        if cluster_metrics:
+            resource_metrics.extend(cluster_metrics)
+            
+        return {"resourceMetrics": resource_metrics}
+
+    def _generate_cluster_level_metrics(self, current_time_ns: str) -> List[Dict[str, Any]]:
+        """Generate deployment, replicaset, and node level metrics."""
+        cluster_resources = []
+        
+        # Get unique clusters, nodes, and namespaces
+        clusters = set()
+        nodes = set()
+        namespaces = set()
+        
+        for service in self.config.services:
+            pod_data = self._k8s_pod_data[service.name]
+            clusters.add(pod_data['cluster_name'])
+            nodes.add(pod_data['node_name'])
+            namespaces.add(pod_data['namespace'])
+        
+        # Generate NODE-LEVEL METRICS
+        for node_name in nodes:
+            node_metrics = []
+            
+            # Node CPU metrics
+            node_metrics.append(self._create_gauge_metric(
+                "k8s.node.cpu.usage", 
+                "ns", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(5000000000, 15000000000))
+                }]
+            ))
+            
+            # Node allocatable CPU (what the node can allocate to pods)
+            node_metrics.append(self._create_gauge_metric(
+                "k8s.node.allocatable_cpu", 
+                "1", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asDouble": random.uniform(2.0, 8.0)  # 2-8 CPU cores
+                }]
+            ))
+            
+            # Node memory metrics
+            node_metrics.append(self._create_gauge_metric(
+                "k8s.node.memory.usage", 
+                "By", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(2000000000, 8000000000))  # 2-8GB
+                }]
+            ))
+            
+            # Node memory working set (active memory)
+            node_metrics.append(self._create_gauge_metric(
+                "k8s.node.memory.working_set", 
+                "By", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(1500000000, 6000000000))  # 1.5-6GB
+                }]
+            ))
+            
+            # Node allocatable memory
+            node_metrics.append(self._create_gauge_metric(
+                "k8s.node.allocatable_memory", 
+                "By", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(8000000000, 16000000000))  # 8-16GB
+                }]
+            ))
+            
+            # Node filesystem metrics
+            node_metrics.append(self._create_gauge_metric(
+                "k8s.node.filesystem.usage", 
+                "By", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(20000000000, 80000000000))  # 20-80GB
+                }]
+            ))
+            
+            node_metrics.append(self._create_gauge_metric(
+                "k8s.node.filesystem.capacity", 
+                "By", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(100000000000, 200000000000))  # 100-200GB
+                }]
+            ))
+            
+            # Node condition - Ready state
+            node_metrics.append(self._create_gauge_metric(
+                "k8s.node.condition_ready", 
+                "1", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": "1"  # 1 = Ready, 0 = Not Ready
+                }]
+            ))
+            
+            node_metrics.append(self._create_gauge_metric(
+                "k8s.node.uptime", 
+                "s", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(86400, 2592000))  # 1 day to 30 days
+                }]
+            ))
+            
+            # Node resource attributes
+            node_attrs = self._format_attributes({
+                "k8s.node.name": node_name,
+                "k8s.cluster.name": list(clusters)[0],  # Use first cluster
+                "host.name": node_name,
+                "cloud.provider": "gcp",
+                "cloud.region": "us-central1"
+            })
+            
+            cluster_resources.append({
+                "resource": {"attributes": node_attrs},
+                "scopeMetrics": [{
+                    "scope": {
+                        "name": "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver", 
+                        "version": "1.0.0"
+                    }, 
+                    "metrics": node_metrics
+                }]
+            })
+        
+        # Generate DEPLOYMENT-LEVEL METRICS
+        for service in self.config.services:
+            pod_data = self._k8s_pod_data[service.name]
+            deployment_metrics = []
+            
+            # Deployment replica metrics
+            deployment_metrics.append(self._create_gauge_metric(
+                "k8s.deployment.replicas_desired", 
+                "1", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(1, 5))
+                }]
+            ))
+            
+            deployment_metrics.append(self._create_gauge_metric(
+                "k8s.deployment.replicas_available", 
+                "1", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(1, 5))
+                }]
+            ))
+            
+            # Deployment resource attributes
+            deployment_attrs = self._format_attributes({
+                "k8s.deployment.name": pod_data['deployment_name'],
+                "k8s.namespace.name": pod_data['namespace'],
+                "k8s.cluster.name": pod_data['cluster_name']
+            })
+            
+            cluster_resources.append({
+                "resource": {"attributes": deployment_attrs},
+                "scopeMetrics": [{
+                    "scope": {
+                        "name": "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver", 
+                        "version": "1.0.0"
+                    }, 
+                    "metrics": deployment_metrics
+                }]
+            })
+            
+            # Generate REPLICASET-LEVEL METRICS  
+            replicaset_metrics = []
+            
+            replicaset_metrics.append(self._create_gauge_metric(
+                "k8s.replicaset.replicas_desired", 
+                "1", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(1, 3))
+                }]
+            ))
+            
+            replicaset_metrics.append(self._create_gauge_metric(
+                "k8s.replicaset.replicas_ready", 
+                "1", 
+                [{
+                    "timeUnixNano": current_time_ns, 
+                    "asInt": str(random.randint(1, 3))
+                }]
+            ))
+            
+            # ReplicaSet resource attributes
+            replicaset_attrs = self._format_attributes({
+                "k8s.replicaset.name": pod_data['replicaset_name'],
+                "k8s.deployment.name": pod_data['deployment_name'],
+                "k8s.namespace.name": pod_data['namespace'],
+                "k8s.cluster.name": pod_data['cluster_name']
+            })
+            
+            cluster_resources.append({
+                "resource": {"attributes": replicaset_attrs},
+                "scopeMetrics": [{
+                    "scope": {
+                        "name": "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver", 
+                        "version": "1.0.0"
+                    }, 
+                    "metrics": replicaset_metrics
+                }]
+            })
+        
+        return cluster_resources
+
     def _generate_resource_attributes(self, service: Service) -> Dict[str, Any]:
-        """Generates a rich set of OTel resource attributes for a service."""
+        """Generates resource attributes for regular metrics compatible with collector processors."""
         lang = service.language.lower()
         runtime_info = self.RUNTIME_INFO.get(lang, {"name": lang, "version": "1.0.0"})
+        
+        # Get k8s pod data for this service to maintain consistency
+        pod_data = self._k8s_pod_data[service.name]
 
         return {
+            # Core service attributes
             "service.name": service.name,
-            "service.namespace": "otel-demo-gen",
+            "service.namespace": pod_data['namespace'],
             "service.version": "1.2.3",
-            "service.instance.id": f"{service.name}-{secrets.token_hex(6)}",
+            "service.instance.id": f"{service.name}-{pod_data['pod_name']}",
+            
+            # Telemetry SDK attributes
             "telemetry.sdk.language": service.language,
             "telemetry.sdk.name": "opentelemetry",
             "telemetry.sdk.version": "1.24.0",
+            
+            # Runtime attributes
             "process.runtime.name": runtime_info["name"],
             "process.runtime.version": runtime_info["version"],
-            "cloud.provider": "aws",
-            "cloud.region": "us-west-2",
+            
+            # Cloud and host attributes to match GCP/GKE setup
+            "cloud.provider": "gcp",
+            "cloud.region": "us-central1",
+            "cloud.availability_zone": pod_data['zone'],
             "deployment.environment": "production",
-            "host.name": f"{service.name}-{secrets.token_hex(2)}",
+            "host.name": pod_data['node_name'],
             "os.type": "linux",
-            "os.description": "Linux 5.15.0-1042-aws",
+            
+            # Basic k8s attributes for regular app metrics
+            "k8s.cluster.name": pod_data['cluster_name'],
+            "k8s.namespace.name": pod_data['namespace'],
+            "k8s.pod.name": pod_data['pod_name'],
+            "k8s.node.name": pod_data['node_name']
         }
 
     def _generate_telemetry(self):
@@ -139,14 +735,24 @@ class TelemetryGenerator:
 
         print("Starting telemetry generator...")
         self._stop_event.clear()
+        
+        # Start main telemetry thread
         self._thread = threading.Thread(target=self._generate_telemetry, name="TelemetryGeneratorThread")
         self._thread.daemon = True
         self._thread.start()
-        print("Generator thread started.")
+        
+        # Start k8s metrics thread
+        self._k8s_thread = threading.Thread(target=self._generate_k8s_telemetry, name="K8sMetricsThread")
+        self._k8s_thread.daemon = True
+        self._k8s_thread.start()
+        
+        print("Generator threads started (main + k8s metrics).")
 
     def is_running(self) -> bool:
-        """Checks if the generator thread is currently running."""
-        return self._thread is not None and self._thread.is_alive()
+        """Checks if the generator threads are currently running."""
+        main_running = self._thread is not None and self._thread.is_alive()
+        k8s_running = self._k8s_thread is not None and self._k8s_thread.is_alive()
+        return main_running or k8s_running
 
     def get_config_as_dict(self) -> Dict[str, Any]:
         """Returns the current scenario configuration as a dictionary."""
@@ -154,16 +760,27 @@ class TelemetryGenerator:
 
     def stop(self):
         """Stops the telemetry generation."""
-        if not self._thread or not self._thread.is_alive():
+        if not self.is_running():
             print("Generator is not running.")
             return
 
         print("Stopping telemetry generator...")
         self._stop_event.set()
-        self._thread.join(timeout=5)
-        if self._thread.is_alive():
-            print("Warning: Generator thread did not stop in time.")
+        
+        # Stop main thread
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                print("Warning: Main generator thread did not stop in time.")
         self._thread = None
+        
+        # Stop k8s thread
+        if self._k8s_thread and self._k8s_thread.is_alive():
+            self._k8s_thread.join(timeout=5)
+            if self._k8s_thread.is_alive():
+                print("Warning: K8s metrics thread did not stop in time.")
+        self._k8s_thread = None
+        
         self.client.close()
         print("Generator stopped.")
 
@@ -197,11 +814,27 @@ class TelemetryGenerator:
         try:
             response = self.client.post(url, data=json.dumps(payload), timeout=5)
             response.raise_for_status()
-            print(f"Successfully sent {signal_name} to {url}")
+            print(f"Successfully sent {signal_name} to {url} - Status: {response.status_code}")
+            
+            # Debug: Log payload structure for metrics
+            if signal_name == "k8s-metrics" and payload.get("resourceMetrics"):
+                resource_count = len(payload["resourceMetrics"])
+                if resource_count > 0:
+                    metric_count = len(payload["resourceMetrics"][0].get("scopeMetrics", [{}])[0].get("metrics", []))
+                    scope_name = payload["resourceMetrics"][0].get("scopeMetrics", [{}])[0].get("scope", {}).get("name", "unknown")
+                    print(f"  📊 Sent {metric_count} k8s metrics from {resource_count} resources with scope: {scope_name}")
+            
+            # Debug: Log payload structure for K8s events
+            if signal_name == "k8s-events" and payload.get("resourceLogs"):
+                resource_count = len(payload["resourceLogs"])
+                total_events = sum(len(rl.get("scopeLogs", [{}])[0].get("logRecords", [])) for rl in payload["resourceLogs"])
+                if total_events > 0:
+                    print(f"  📝 Sent {total_events} k8s events from {resource_count} resources")
+            
         except httpx.RequestError as e:
-            print(f"Error sending {signal_name} to collector: {e}")
+            print(f"❌ Error sending {signal_name} to collector: {e}")
         except Exception as e:
-            print(f"An unexpected error occurred while sending {signal_name}: {e}")
+            print(f"❌ An unexpected error occurred while sending {signal_name}: {e}")
 
     def _generate_id(self, byte_length: int) -> str:
         """Generates a random hex ID."""
@@ -262,6 +895,59 @@ class TelemetryGenerator:
         if latency_config and random.random() < latency_config.probability:
             return random.randint(latency_config.min_ms, latency_config.max_ms) * 1_000_000
         return 0
+
+    def _generate_business_data_attributes(self, operation: Operation) -> Dict[str, Any]:
+        """Generates business data attributes based on the operation's business_data configuration."""
+        attributes = {}
+        
+        if not operation.business_data:
+            return attributes
+            
+        for field in operation.business_data:
+            try:
+                if field.type == "string":
+                    if field.pattern:
+                        # Replace pattern placeholders with generated values
+                        value = field.pattern
+                        if "{random}" in value:
+                            value = value.replace("{random}", secrets.token_hex(4))
+                        if "{uuid}" in value:
+                            value = value.replace("{uuid}", str(uuid.uuid4()))
+                        if "{random_string}" in value:
+                            value = value.replace("{random_string}", secrets.token_hex(6))
+                        attributes[field.name] = value
+                    else:
+                        # Default string generation
+                        attributes[field.name] = f"value_{secrets.token_hex(4)}"
+                        
+                elif field.type == "number":
+                    min_val = field.min_value if field.min_value is not None else 0.0
+                    max_val = field.max_value if field.max_value is not None else 100.0
+                    attributes[field.name] = round(random.uniform(min_val, max_val), 2)
+                    
+                elif field.type == "integer":
+                    min_val = int(field.min_value) if field.min_value is not None else 0
+                    max_val = int(field.max_value) if field.max_value is not None else 100
+                    attributes[field.name] = random.randint(min_val, max_val)
+                    
+                elif field.type == "boolean":
+                    attributes[field.name] = random.choice([True, False])
+                    
+                elif field.type == "enum":
+                    if field.values:
+                        attributes[field.name] = secrets.choice(field.values)
+                    else:
+                        attributes[field.name] = "default_value"
+                        
+                else:
+                    # Fallback for unknown types
+                    attributes[field.name] = f"unknown_type_{field.type}"
+                    
+            except Exception as e:
+                print(f"Warning: Error generating business data for field '{field.name}': {e}")
+                attributes[field.name] = "generation_error"
+                
+        return attributes
 
     def format_otlp_trace_payload(self, spans_by_service: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Any]]:
         """
@@ -538,6 +1224,11 @@ class TelemetryGenerator:
             if queue_system == 'kafka':
                 attributes['messaging.kafka.destination.partition'] = str(secrets.randbelow(3))
                 attributes['messaging.kafka.message.offset'] = str(secrets.randbelow(100000))
+        
+        # --- Add business data attributes from operation ---
+        if operation:
+            business_attributes = self._generate_business_data_attributes(operation)
+            attributes.update(business_attributes)
 
         service_span = {
             "traceId": trace_id,
@@ -789,6 +1480,151 @@ class TelemetryGenerator:
             "startTimeUnixNano": str(start_time), "endTimeUnixNano": str(end_time),
             "status": {"code": "STATUS_CODE_OK"}, "attributes": attributes
         }, end_time)
+
+    def generate_k8s_events_payload(self) -> Dict[str, List[Any]]:
+        """Generate OTLP logs payload for Kubernetes events."""
+        resource_logs = []
+        current_time_ns = str(time.time_ns())
+        
+        # K8s event types and their typical reasons
+        event_scenarios = [
+            {
+                "type": "Warning",
+                "reason": "FailedScheduling", 
+                "message": "0/3 nodes are available: 3 Insufficient memory.",
+                "object_kind": "Pod",
+                "weight": 0.1  # Less frequent
+            },
+            {
+                "type": "Warning", 
+                "reason": "Unhealthy",
+                "message": "Readiness probe failed: HTTP probe failed with statuscode: 503",
+                "object_kind": "Pod",
+                "weight": 0.15
+            },
+            {
+                "type": "Warning",
+                "reason": "BackOff", 
+                "message": "Back-off restarting failed container",
+                "object_kind": "Pod",
+                "weight": 0.1
+            },
+            {
+                "type": "Warning",
+                "reason": "FailedMount",
+                "message": "Unable to attach or mount volumes: unmounted volumes=[config], unattached volumes=[config default-token]",
+                "object_kind": "Pod", 
+                "weight": 0.05
+            },
+            {
+                "type": "Normal",
+                "reason": "Scheduled",
+                "message": "Successfully assigned default/{pod_name} to {node_name}",
+                "object_kind": "Pod",
+                "weight": 0.2
+            },
+            {
+                "type": "Normal",
+                "reason": "Pulling",
+                "message": "Pulling image \"{service_name}:latest\"",
+                "object_kind": "Pod",
+                "weight": 0.15
+            },
+            {
+                "type": "Normal", 
+                "reason": "Pulled",
+                "message": "Successfully pulled image \"{service_name}:latest\"",
+                "object_kind": "Pod",
+                "weight": 0.15
+            },
+            {
+                "type": "Normal",
+                "reason": "Created",
+                "message": "Created container {service_name}",
+                "object_kind": "Pod",
+                "weight": 0.1
+            }
+        ]
+        
+        # Generate events for each service
+        for service in self.config.services:
+            pod_data = self._k8s_pod_data[service.name]
+            
+            # Randomly select 1-3 events for this service
+            num_events = random.choices([0, 1, 2, 3], weights=[0.4, 0.3, 0.2, 0.1])[0]
+            
+            if num_events == 0:
+                continue
+                
+            selected_events = random.choices(
+                event_scenarios, 
+                weights=[e["weight"] for e in event_scenarios],
+                k=num_events
+            )
+            
+            log_records = []
+            
+            for event in selected_events:
+                # Format message with actual service/pod data
+                message = event["message"].format(
+                    service_name=service.name,
+                    pod_name=pod_data['pod_name'],
+                    node_name=pod_data['node_name']
+                )
+                
+                # Create event log record
+                event_time_ns = str(int(current_time_ns) - random.randint(0, 3600000000000))  # Within last hour
+                
+                log_record = {
+                    "timeUnixNano": event_time_ns,
+                    "severityText": "INFO" if event["type"] == "Normal" else "WARN",
+                    "severityNumber": 9 if event["type"] == "Normal" else 13,
+                    "body": {"stringValue": message},
+                    "attributes": [
+                        {"key": "k8s.event.type", "value": {"stringValue": event["type"]}},
+                        {"key": "k8s.event.reason", "value": {"stringValue": event["reason"]}}, 
+                        {"key": "k8s.event.object.kind", "value": {"stringValue": event["object_kind"]}},
+                        {"key": "k8s.event.object.name", "value": {"stringValue": pod_data['pod_name']}},
+                        {"key": "k8s.event.object.namespace", "value": {"stringValue": pod_data['namespace']}},
+                        {"key": "k8s.event.object.uid", "value": {"stringValue": pod_data['pod_uid']}},
+                        {"key": "k8s.event.count", "value": {"intValue": random.randint(1, 5)}},
+                        {"key": "k8s.event.first_time", "value": {"stringValue": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')}},
+                        {"key": "k8s.event.last_time", "value": {"stringValue": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')}},
+                        {"key": "k8s.event.source.component", "value": {"stringValue": random.choice(["kubelet", "scheduler", "controller-manager", "deployment-controller"])}},
+                        # Additional fields for better filtering
+                        {"key": "log.level", "value": {"stringValue": "INFO" if event["type"] == "Normal" else "WARN"}},
+                        {"key": "event.dataset", "value": {"stringValue": "kubernetes.events"}},
+                        {"key": "event.module", "value": {"stringValue": "kubernetes"}},
+                    ]
+                }
+                
+                log_records.append(log_record)
+            
+            if log_records:
+                # Resource attributes for K8s events (cluster-level)
+                event_resource_attrs = self._format_attributes({
+                    "k8s.cluster.name": pod_data['cluster_name'],
+                    "k8s.namespace.name": pod_data['namespace'],
+                    "cloud.provider": "gcp",
+                    "cloud.region": "us-central1",
+                    "event.dataset": "kubernetes.events",
+                    "data_stream.type": "logs",
+                    "data_stream.dataset": "kubernetes.events",
+                    "data_stream.namespace": "default"
+                })
+                
+                resource_logs.append({
+                    "resource": {"attributes": event_resource_attrs},
+                    "scopeLogs": [{
+                        "scope": {
+                            "name": "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sobjectsreceiver",
+                            "version": "1.0.0"
+                        },
+                        "logRecords": log_records
+                    }]
+                })
+        
+        return {"resourceLogs": resource_logs}
 
 def main_test():
     """Example usage for standalone testing of the generator."""
