@@ -1,10 +1,99 @@
 import os
+import json
 from openai import OpenAI
+import boto3
 from dotenv import load_dotenv
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Don't initialize clients on import - do them lazily
+openai_client = None
+bedrock_client = None
+
+def _get_openai_client():
+    """Get or create the OpenAI client lazily."""
+    global openai_client
+    if openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.")
+        openai_client = OpenAI(api_key=api_key)
+    return openai_client
+
+def _get_bedrock_client():
+    """Get or create the Bedrock client lazily."""
+    global bedrock_client
+    if bedrock_client is None:
+        aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
+        aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+        aws_region = os.getenv("AWS_REGION", "us-east-1")
+        
+        if not aws_access_key or not aws_secret_key:
+            raise ValueError(
+                "AWS credentials not found. Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables."
+            )
+        
+        bedrock_client = boto3.client(
+            service_name='bedrock-runtime',
+            aws_access_key_id=aws_access_key,
+            aws_secret_access_key=aws_secret_key,
+            region_name=aws_region
+        )
+    return bedrock_client
+
+def _get_llm_provider():
+    """Get the configured LLM provider."""
+    return os.getenv("LLM_PROVIDER", "openai").lower()
+
+def _call_openai(prompt: str) -> str:
+    """Call OpenAI API."""
+    client = _get_openai_client()
+    model = os.getenv("OPENAI_MODEL", "o3")
+    
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    return completion.choices[0].message.content
+
+def _call_bedrock(prompt: str) -> str:
+    """Call Amazon Bedrock Claude API."""
+    client = _get_bedrock_client()
+    model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-sonnet-4-20250514-v1:0")
+    
+    # Format the prompt for Claude
+    formatted_prompt = f"Human: {SYSTEM_PROMPT}\n\n{prompt}\n\nAssistant:"
+    
+    # Prepare the request body for Claude
+    request_body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 4000,
+        "temperature": 0.1,
+        "messages": [
+            {
+                "role": "user", 
+                "content": [{"type": "text", "text": f"{SYSTEM_PROMPT}\n\n{prompt}"}]
+            }
+        ]
+    }
+    
+    try:
+        response = client.invoke_model(
+            modelId=model_id,
+            body=json.dumps(request_body),
+            contentType="application/json"
+        )
+        
+        # Parse response
+        response_body = json.loads(response['body'].read())
+        return response_body['content'][0]['text']
+        
+    except Exception as e:
+        print(f"Error calling Bedrock API: {e}")
+        raise
 
 SYSTEM_PROMPT = """
 You are an expert assistant that generates architecture configuration files for a microservices observability demo tool.
@@ -146,28 +235,34 @@ def generate_config_from_description(description: str) -> str:
         A string containing the generated YAML configuration.
     
     Raises:
-        Exception: If the OpenAI API call fails.
+        ValueError: If LLM provider is not configured properly.
+        Exception: If the LLM API call fails.
     """
     try:
-        completion = client.chat.completions.create(
-            model="o3",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": description},
-            ],
-        )
-        response_content = completion.choices[0].message.content
+        provider = _get_llm_provider()
+        
+        if provider == "openai":
+            response_content = _call_openai(description)
+        elif provider == "bedrock":
+            response_content = _call_bedrock(description)
+        else:
+            raise ValueError(f"Unsupported LLM provider: {provider}. Use 'openai' or 'bedrock'.")
         
         # The LLM sometimes wraps the output in ```yaml ... ```, so we strip that.
         if response_content.startswith("```yaml"):
             response_content = response_content[7:]
+        elif response_content.startswith("```"):
+            response_content = response_content[3:]
         if response_content.endswith("```"):
             response_content = response_content[:-3]
         
         return response_content.strip()
 
+    except ValueError as e:
+        # Re-raise ValueError with the configuration message
+        raise e
     except Exception as e:
-        print(f"Error calling OpenAI API: {e}")
+        print(f"Error calling LLM API: {e}")
         raise
 
 if __name__ == '__main__':

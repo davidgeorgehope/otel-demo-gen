@@ -1,0 +1,41 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: otel-demo-ingress
+  namespace: otel-demo
+  labels:
+    app: otel-demo
+  annotations:
+    # Common ingress annotations - adjust based on your ingress controller
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+    # For production, consider enabling SSL/TLS:
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  # For production with SSL/TLS:
+  # tls:
+  # - hosts:
+  #   - otel-demo.your-domain.com
+  #   secretName: otel-demo-tls
+  rules:
+  - host: otel-demo.localhost  # Change this to your domain
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: otel-demo-frontend
+            port:
+              number: 80
+  # Alternative: Use without hostname for testing
+  # - http:
+  #     paths:
+  #     - path: /
+  #       pathType: Prefix
+  #       backend:
+  #         service:
+  #           name: otel-demo-frontend
+  #           port:
+  #             number: 80 

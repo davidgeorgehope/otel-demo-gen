@@ -1,23 +1,54 @@
 import React from 'react';
+import LLMStatus from './LLMStatus';
+import { API_BASE_URL } from '../config';
 
-const ScenarioForm = ({ scenario, setScenario, handleGenerateConfig, isLoading }) => {
+const ScenarioForm = ({ scenario, setScenario, handleGenerateConfig, isLoading, setYamlConfig }) => {
+  const handleLoadTestConfig = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/test-config`)
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+      const data = await response.json()
+      // Use the passed setYamlConfig function
+      setYamlConfig(data.yaml)
+      // Also set a default scenario description
+      setScenario("Test scenario: 3-tier web application with TypeScript frontend, Java API gateway, and Python user service")
+    } catch (error) {
+      console.error("Failed to load test config:", error)
+    }
+  }
+
   return (
-    <div className="bg-gray-800 p-6 rounded-lg shadow-lg">
-      <h2 className="text-2xl font-semibold mb-4 text-white">1. Describe Your Scenario</h2>
-      <textarea
-        className="w-full h-32 p-3 bg-gray-700 rounded-md border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-200"
-        placeholder="e.g., a financial services app with 10 microservices, Postgres and Redis databases, and a Kafka queue"
-        value={scenario}
-        onChange={(e) => setScenario(e.target.value)}
-        disabled={isLoading}
-      />
-      <button
-        onClick={handleGenerateConfig}
-        disabled={isLoading || !scenario.trim()}
-        className="mt-4 px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors duration-200 font-semibold"
-      >
-        {isLoading ? 'Generating...' : 'Generate Config'}
-      </button>
+    <div className="space-y-6">
+      <div className="bg-gray-800 p-6 rounded-lg shadow-lg">
+        <h2 className="text-2xl font-semibold mb-4 text-white">1. Describe Your Scenario</h2>
+        <textarea
+          value={scenario}
+          onChange={(e) => setScenario(e.target.value)}
+          placeholder="Describe your microservices architecture (e.g., 'E-commerce platform with user service, product catalog, payment processing, and notification system')"
+          className="w-full h-32 p-3 bg-gray-700 rounded-md border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-200 placeholder-gray-400"
+          disabled={isLoading}
+        />
+        <div className="mt-4 flex gap-3">
+          <button
+            onClick={handleGenerateConfig}
+            disabled={isLoading || !scenario.trim()}
+            className="flex-1 px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors duration-200 font-semibold"
+          >
+            {isLoading ? 'Generating...' : 'Generate Configuration'}
+          </button>
+          <button
+            onClick={handleLoadTestConfig}
+            disabled={isLoading}
+            className="px-6 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors duration-200 font-semibold"
+          >
+            Load Test Config
+          </button>
+        </div>
+      </div>
+      
+      <LLMStatus />
     </div>
   );
 };

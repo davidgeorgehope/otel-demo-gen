@@ -6,3 +6,4 @@ httpx
 python-dotenv
 openai
 requests
+boto3

@@ -8,6 +8,7 @@ const Controls = ({
   isDemoRunning,
   handleStartDemo,
   handleStopDemo,
+  currentJobId,
 }) => {
   return (
     <div className="bg-gray-800 p-6 rounded-lg shadow-lg mt-8">
@@ -41,6 +42,19 @@ const Controls = ({
           />
         </div>
       </div>
+      
+      {/* Current Job Info */}
+      {currentJobId && (
+        <div className="mt-4 p-3 bg-blue-900 rounded-md border border-blue-700">
+          <div className="flex items-center">
+            <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
+            <span className="text-sm text-blue-200">
+              Current Job: <span className="font-mono font-medium">{currentJobId}</span>
+            </span>
+          </div>
+        </div>
+      )}
+      
       <div className="mt-6 flex space-x-4 items-center">
         <button
           onClick={handleStartDemo}

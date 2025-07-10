@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: otel-demo
+  labels:
+    name: otel-demo
+    app: otel-demo-generator 
