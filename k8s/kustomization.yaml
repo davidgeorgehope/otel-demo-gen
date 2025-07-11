@@ -9,7 +9,6 @@ resources:
 - backend-service.yaml
 - frontend-deployment.yaml
 - frontend-service.yaml
-- ingress.yaml
 
 # Common labels for all resources
 commonLabels:
@@ -19,9 +18,11 @@ commonLabels:
 # Namespace for all resources
 namespace: otel-demo
 
-# Images to use - these should be updated to your actual image registry
+# Images to use - updated to use djhope99 Docker Hub registry
 images:
 - name: otel-demo-backend
+  newName: djhope99/otel-demo-backend
   newTag: latest
 - name: otel-demo-frontend
+  newName: djhope99/otel-demo-frontend
   newTag: latest 

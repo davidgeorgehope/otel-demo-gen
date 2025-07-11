@@ -1,309 +1,373 @@
 #!/bin/bash
 
-# AI-Powered Observability Demo Generator Deployment Script
+# End-to-end Kubernetes deployment script for OTEL Demo Generator
+# This script builds Docker images, pushes them to Docker Hub, and deploys to k8s
 
-set -e
+set -e  # Exit on any error
 
+# Configuration
+DOCKER_REGISTRY="djhope99"
+BACKEND_IMAGE="$DOCKER_REGISTRY/otel-demo-backend"
+FRONTEND_IMAGE="$DOCKER_REGISTRY/otel-demo-frontend"
+NAMESPACE="otel-demo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
-
-# Default values
-DEPLOYMENT_TYPE="docker-compose"
-ENVIRONMENT="local"
-NAMESPACE="otel-demo"
-IMAGE_TAG="latest"
-REGISTRY=""
-
-# Help function
-show_help() {
-    echo "Usage: $0 [OPTIONS]"
-    echo ""
-    echo "Options:"
-    echo "  -t, --type TYPE         Deployment type: docker-compose, kubernetes (default: docker-compose)"
-    echo "  -e, --env ENV           Environment: local, staging, production (default: local)"
-    echo "  -n, --namespace NS      Kubernetes namespace (default: otel-demo)"
-    echo "  -i, --image-tag TAG     Image tag (default: latest)"
-    echo "  -r, --registry REG      Container registry URL"
-    echo "  -h, --help              Show this help message"
-    echo ""
-    echo "Examples:"
-    echo "  $0                                    # Deploy with Docker Compose (default)"
-    echo "  $0 -t kubernetes                     # Deploy to Kubernetes"
-    echo "  $0 -t kubernetes -e production       # Deploy to Kubernetes production"
-    echo "  $0 -t docker-compose -e local        # Deploy locally with Docker Compose"
-}
-
-# Parse command line arguments
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        -t|--type)
-            DEPLOYMENT_TYPE="$2"
-            shift 2
-            ;;
-        -e|--env)
-            ENVIRONMENT="$2"
-            shift 2
-            ;;
-        -n|--namespace)
-            NAMESPACE="$2"
-            shift 2
-            ;;
-        -i|--image-tag)
-            IMAGE_TAG="$2"
-            shift 2
-            ;;
-        -r|--registry)
-            REGISTRY="$2"
-            shift 2
-            ;;
-        -h|--help)
-            show_help
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1"
-            show_help
-            exit 1
-            ;;
-    esac
-done
 
 # Logging functions
 log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    echo -e "${BLUE}[INFO]${NC} $1"
 }
 
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Check prerequisites
+# Function to check if required tools are installed
 check_prerequisites() {
     log_info "Checking prerequisites..."
     
-    if [[ "$DEPLOYMENT_TYPE" == "docker-compose" ]]; then
-        if ! command -v docker &> /dev/null; then
-            log_error "Docker is not installed or not in PATH"
-            exit 1
-        fi
-        
-        if ! command -v docker-compose &> /dev/null; then
-            log_error "Docker Compose is not installed or not in PATH"
-            exit 1
-        fi
+    local missing_tools=()
+    
+    if ! command -v docker &> /dev/null; then
+        missing_tools+=("docker")
     fi
     
-    if [[ "$DEPLOYMENT_TYPE" == "kubernetes" ]]; then
-        if ! command -v kubectl &> /dev/null; then
-            log_error "kubectl is not installed or not in PATH"
-            exit 1
-        fi
-        
-        if ! kubectl cluster-info &> /dev/null; then
-            log_error "kubectl is not configured or cluster is not reachable"
-            exit 1
-        fi
+    if ! command -v kubectl &> /dev/null; then
+        missing_tools+=("kubectl")
     fi
     
-    log_info "Prerequisites check passed"
+    if ! command -v kustomize &> /dev/null; then
+        missing_tools+=("kustomize")
+    fi
+    
+    if [ ${#missing_tools[@]} -ne 0 ]; then
+        log_error "Missing required tools: ${missing_tools[*]}"
+        log_error "Please install the missing tools and run this script again."
+        exit 1
+    fi
+    
+    log_success "All prerequisites are installed"
 }
 
-# Check environment variables
-check_env_vars() {
-    log_info "Checking environment variables..."
+# Function to check Docker login
+check_docker_login() {
+    log_info "Checking Docker Hub authentication..."
     
-    if [[ -f "$PROJECT_DIR/.env" ]]; then
-        log_info "Found .env file"
-        source "$PROJECT_DIR/.env"
-    else
-        log_warn ".env file not found. Using environment variables from shell"
+    if ! docker info | grep -q "Username:"; then
+        log_warning "Not logged in to Docker Hub. Please login:"
+        docker login
     fi
     
-    if [[ -z "$OPENAI_API_KEY" ]] && [[ -z "$AWS_ACCESS_KEY_ID" ]]; then
-        log_warn "Neither OPENAI_API_KEY nor AWS_ACCESS_KEY_ID is set"
-        log_warn "The application will work but config generation will fail"
-    fi
+    log_success "Docker Hub authentication verified"
 }
 
-# Build Docker images
+# Function to build Docker images
 build_images() {
     log_info "Building Docker images..."
     
-    cd "$PROJECT_DIR"
+    # Get current git commit hash for tagging
+    GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+    VERSION_TAG="$TIMESTAMP-$GIT_HASH"
     
-    # Build backend
+    # Build backend image
     log_info "Building backend image..."
-    docker build -t otel-demo-backend:${IMAGE_TAG} backend/
+    docker build -t "$BACKEND_IMAGE:latest" -t "$BACKEND_IMAGE:$VERSION_TAG" "$PROJECT_ROOT/backend"
     
-    # Build frontend
+    # Build frontend image
     log_info "Building frontend image..."
-    docker build -t otel-demo-frontend:${IMAGE_TAG} frontend/
+    docker build -t "$FRONTEND_IMAGE:latest" -t "$FRONTEND_IMAGE:$VERSION_TAG" "$PROJECT_ROOT/frontend"
     
-    # Tag and push if registry is provided
-    if [[ -n "$REGISTRY" ]]; then
-        log_info "Tagging and pushing images to registry..."
-        
-        docker tag otel-demo-backend:${IMAGE_TAG} ${REGISTRY}/otel-demo-backend:${IMAGE_TAG}
-        docker tag otel-demo-frontend:${IMAGE_TAG} ${REGISTRY}/otel-demo-frontend:${IMAGE_TAG}
-        
-        docker push ${REGISTRY}/otel-demo-backend:${IMAGE_TAG}
-        docker push ${REGISTRY}/otel-demo-frontend:${IMAGE_TAG}
-    fi
-    
-    log_info "Docker images built successfully"
+    log_success "Docker images built successfully"
+    log_info "Images tagged with: latest, $VERSION_TAG"
 }
 
-# Deploy with Docker Compose
-deploy_docker_compose() {
-    log_info "Deploying with Docker Compose..."
+# Function to push Docker images
+push_images() {
+    log_info "Pushing Docker images to Docker Hub..."
     
-    cd "$PROJECT_DIR"
+    # Push backend image
+    log_info "Pushing backend image..."
+    docker push "$BACKEND_IMAGE:latest"
+    docker push "$BACKEND_IMAGE:$VERSION_TAG"
     
-    # Stop existing containers
-    docker-compose down 2>/dev/null || true
+    # Push frontend image
+    log_info "Pushing frontend image..."
+    docker push "$FRONTEND_IMAGE:latest"
+    docker push "$FRONTEND_IMAGE:$VERSION_TAG"
     
-    # Start services
-    docker-compose up -d --build
+    log_success "Docker images pushed successfully"
+}
+
+# Function to check Kubernetes cluster connectivity
+check_k8s_connection() {
+    log_info "Checking Kubernetes cluster connectivity..."
     
-    log_info "Waiting for services to start..."
-    sleep 10
-    
-    # Check if services are running
-    if docker-compose ps | grep -q "Up"; then
-        log_info "Services started successfully"
-        echo ""
-        log_info "Application URLs:"
-        log_info "  Frontend: http://localhost:3000"
-        log_info "  Backend API: http://localhost:8000"
-        log_info "  OTLP Collector: http://localhost:4318"
-        echo ""
-        log_info "View logs: docker-compose logs -f"
-        log_info "Stop services: docker-compose down"
-    else
-        log_error "Failed to start services"
-        docker-compose logs
+    if ! kubectl cluster-info &> /dev/null; then
+        log_error "Unable to connect to Kubernetes cluster"
+        log_error "Please ensure your kubectl is configured and cluster is accessible"
         exit 1
     fi
+    
+    CLUSTER_NAME=$(kubectl config current-context)
+    log_success "Connected to Kubernetes cluster: $CLUSTER_NAME"
 }
 
-# Deploy to Kubernetes
-deploy_kubernetes() {
+# Function to deploy to Kubernetes
+deploy_to_k8s() {
     log_info "Deploying to Kubernetes..."
     
-    cd "$PROJECT_DIR"
+    # Navigate to k8s directory
+    cd "$PROJECT_ROOT/k8s"
     
-    # Update image references if registry is provided
-    if [[ -n "$REGISTRY" ]]; then
-        log_info "Updating image references in Kubernetes manifests..."
+    # Apply the kustomization
+    log_info "Applying Kubernetes manifests..."
+    kustomize build . | kubectl apply -f -
+    
+    # Wait for deployments to be ready
+    log_info "Waiting for deployments to be ready..."
+    kubectl wait --for=condition=available --timeout=300s deployment/otel-demo-backend -n $NAMESPACE
+    kubectl wait --for=condition=available --timeout=300s deployment/otel-demo-frontend -n $NAMESPACE
+    
+    log_success "Kubernetes deployment completed successfully"
+}
+
+# Function to display deployment status
+show_deployment_status() {
+    log_info "Deployment Status:"
+    echo ""
+    
+    # Show pods
+    echo "Pods:"
+    kubectl get pods -n $NAMESPACE -o wide
+    echo ""
+    
+    # Show services
+    echo "Services:"
+    kubectl get services -n $NAMESPACE -o wide
+    echo ""
+    
+    # Show deployment status
+    echo "Deployments:"
+    kubectl get deployments -n $NAMESPACE -o wide
+    echo ""
+    
+    # Get service access information
+    get_service_access_info
+}
+
+# Function to get service access information
+get_service_access_info() {
+    log_info "Service Access Information:"
+    
+    # Check if services are LoadBalancer type
+    BACKEND_SERVICE_TYPE=$(kubectl get service otel-demo-backend -n $NAMESPACE -o jsonpath='{.spec.type}' 2>/dev/null || echo "Unknown")
+    FRONTEND_SERVICE_TYPE=$(kubectl get service otel-demo-frontend -n $NAMESPACE -o jsonpath='{.spec.type}' 2>/dev/null || echo "Unknown")
+    
+    if [ "$BACKEND_SERVICE_TYPE" = "LoadBalancer" ] || [ "$FRONTEND_SERVICE_TYPE" = "LoadBalancer" ]; then
+        log_info "Waiting for LoadBalancer external IPs (this may take a few minutes)..."
         
-        # Create a temporary kustomization file
-        cat > k8s/kustomization-temp.yaml << EOF
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-
-resources:
-- namespace.yaml
-- secret.yaml
-- configmap.yaml
-- backend-deployment.yaml
-- backend-service.yaml
-- frontend-deployment.yaml
-- frontend-service.yaml
-- ingress.yaml
-
-commonLabels:
-  app: otel-demo-generator
-  version: ${IMAGE_TAG}
-  environment: ${ENVIRONMENT}
-
-namespace: ${NAMESPACE}
-
-images:
-- name: otel-demo-backend
-  newName: ${REGISTRY}/otel-demo-backend
-  newTag: ${IMAGE_TAG}
-- name: otel-demo-frontend
-  newName: ${REGISTRY}/otel-demo-frontend
-  newTag: ${IMAGE_TAG}
-EOF
+        # Wait for external IPs to be assigned
+        local max_wait=300  # 5 minutes
+        local wait_time=0
         
-        # Deploy with temporary kustomization
-        kubectl apply -k k8s/ -f k8s/kustomization-temp.yaml
+        while [ $wait_time -lt $max_wait ]; do
+            BACKEND_EXTERNAL_IP=$(kubectl get service otel-demo-backend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+            FRONTEND_EXTERNAL_IP=$(kubectl get service otel-demo-frontend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+            
+            # Also check for hostname (some cloud providers use hostname instead of IP)
+            if [ -z "$BACKEND_EXTERNAL_IP" ]; then
+                BACKEND_EXTERNAL_IP=$(kubectl get service otel-demo-backend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            fi
+            
+            if [ -z "$FRONTEND_EXTERNAL_IP" ]; then
+                FRONTEND_EXTERNAL_IP=$(kubectl get service otel-demo-frontend -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+            fi
+            
+            if [ -n "$BACKEND_EXTERNAL_IP" ] && [ -n "$FRONTEND_EXTERNAL_IP" ]; then
+                break
+            fi
+            
+            echo "  Still waiting for external IPs... ($wait_time/${max_wait}s)"
+            sleep 10
+            wait_time=$((wait_time + 10))
+        done
         
-        # Clean up temporary file
-        rm k8s/kustomization-temp.yaml
+        if [ -n "$BACKEND_EXTERNAL_IP" ] && [ -n "$FRONTEND_EXTERNAL_IP" ]; then
+            log_success "LoadBalancer services are ready!"
+            echo "  Backend:  http://$BACKEND_EXTERNAL_IP:8000"
+            echo "  Frontend: http://$FRONTEND_EXTERNAL_IP:80"
+            echo ""
+            log_info "API Health Check:"
+            echo "  curl http://$BACKEND_EXTERNAL_IP:8000/"
+            echo ""
+            log_info "To monitor external IPs:"
+            echo "  kubectl get services -n $NAMESPACE -w"
+        else
+            log_warning "LoadBalancer external IPs not yet available after ${max_wait}s"
+            echo "  This is normal for some cloud providers - external IPs may take longer to provision"
+            echo "  Check status with: kubectl get services -n $NAMESPACE -w"
+            echo ""
+            echo "  Current service status:"
+            kubectl get services -n $NAMESPACE
+        fi
     else
-        # Deploy with default kustomization
-        kubectl apply -k k8s/
+        echo "  Services are using ClusterIP. Use port-forwarding to access:"
+        echo "  Backend:  kubectl port-forward service/otel-demo-backend 8000:8000 -n $NAMESPACE"
+        echo "  Frontend: kubectl port-forward service/otel-demo-frontend 5173:80 -n $NAMESPACE"
+    fi
+}
+
+# Function to setup port forwarding for local access (fallback for non-LoadBalancer)
+setup_port_forwarding() {
+    # Check if services are LoadBalancer type
+    BACKEND_SERVICE_TYPE=$(kubectl get service otel-demo-backend -n $NAMESPACE -o jsonpath='{.spec.type}' 2>/dev/null || echo "Unknown")
+    FRONTEND_SERVICE_TYPE=$(kubectl get service otel-demo-frontend -n $NAMESPACE -o jsonpath='{.spec.type}' 2>/dev/null || echo "Unknown")
+    
+    if [ "$BACKEND_SERVICE_TYPE" = "LoadBalancer" ] || [ "$FRONTEND_SERVICE_TYPE" = "LoadBalancer" ]; then
+        log_info "Services are configured as LoadBalancer - external access should be available directly"
+        log_info "Run './scripts/deploy.sh status' to check external IP addresses"
+        return 0
     fi
     
-    log_info "Waiting for deployment to complete..."
-    kubectl wait --for=condition=available --timeout=300s deployment/otel-demo-backend -n ${NAMESPACE}
-    kubectl wait --for=condition=available --timeout=300s deployment/otel-demo-frontend -n ${NAMESPACE}
+    log_info "Setting up port forwarding for local access..."
     
-    log_info "Deployment completed successfully"
-    echo ""
-    log_info "Checking deployment status:"
-    kubectl get pods -n ${NAMESPACE}
-    echo ""
+    # Kill existing port-forward processes
+    pkill -f "kubectl port-forward.*otel-demo" 2>/dev/null || true
     
-    # Get ingress info
-    if kubectl get ingress -n ${NAMESPACE} &> /dev/null; then
-        log_info "Ingress information:"
-        kubectl get ingress -n ${NAMESPACE}
-        echo ""
-    fi
+    # Start port forwarding in background
+    kubectl port-forward service/otel-demo-backend 8000:8000 -n $NAMESPACE &
+    kubectl port-forward service/otel-demo-frontend 5173:80 -n $NAMESPACE &
     
-    log_info "Useful commands:"
-    log_info "  View pods: kubectl get pods -n ${NAMESPACE}"
-    log_info "  View logs: kubectl logs -n ${NAMESPACE} deployment/otel-demo-backend"
-    log_info "  Delete deployment: kubectl delete -k k8s/"
+    sleep 2
+    
+    log_success "Port forwarding established:"
+    log_info "  Backend:  http://localhost:8000"
+    log_info "  Frontend: http://localhost:5173"
+    log_info "  Use 'pkill -f \"kubectl port-forward.*otel-demo\"' to stop port forwarding"
+}
+
+# Function to cleanup deployment
+cleanup_deployment() {
+    log_info "Cleaning up deployment..."
+    
+    cd "$PROJECT_ROOT/k8s"
+    kustomize build . | kubectl delete -f - --ignore-not-found=true
+    
+    log_success "Deployment cleanup completed"
+}
+
+# Function to show help
+show_help() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+End-to-end Kubernetes deployment script for OTEL Demo Generator
+
+ OPTIONS:
+     deploy          Full deployment (build, push, deploy) [default]
+     build           Build Docker images only
+     push            Push Docker images only (requires build first)
+     k8s             Deploy to Kubernetes only (requires images in registry)
+     status          Show deployment status and external IPs
+     port-forward    Setup port forwarding (fallback for non-LoadBalancer)
+     cleanup         Remove deployment from Kubernetes
+     help            Show this help message
+
+EXAMPLES:
+    $0                    # Full deployment
+    $0 deploy             # Full deployment
+    $0 build              # Build images only
+    $0 push               # Push images only
+    $0 k8s                # Deploy to k8s only
+    $0 status             # Show deployment status
+    $0 port-forward       # Setup port forwarding
+    $0 cleanup            # Remove deployment
+
+ PREREQUISITES:
+     - Docker installed and logged in to Docker Hub
+     - kubectl configured with cluster access
+     - kustomize installed
+     - Git (for version tagging)
+     - Cloud provider LoadBalancer support (AWS ELB, GCP LB, Azure LB, etc.)
+
+ NOTES:
+     - Services are configured as LoadBalancer type for external access
+     - External IP assignment may take 2-5 minutes depending on cloud provider
+     - Use 'kubectl get services -n otel-demo -w' to monitor IP assignment
+
+EOF
 }
 
 # Main execution
 main() {
-    echo "AI-Powered Observability Demo Generator Deployment Script"
-    echo "=========================================================="
-    echo ""
-    log_info "Deployment type: $DEPLOYMENT_TYPE"
-    log_info "Environment: $ENVIRONMENT"
-    log_info "Image tag: $IMAGE_TAG"
-    if [[ -n "$REGISTRY" ]]; then
-        log_info "Registry: $REGISTRY"
-    fi
-    echo ""
+    local action=${1:-deploy}
     
-    check_prerequisites
-    check_env_vars
-    build_images
-    
-    case $DEPLOYMENT_TYPE in
-        docker-compose)
-            deploy_docker_compose
+    case $action in
+                 deploy)
+             check_prerequisites
+             check_docker_login
+             check_k8s_connection
+             build_images
+             push_images
+             deploy_to_k8s
+             show_deployment_status
+             ;;
+        build)
+            check_prerequisites
+            build_images
             ;;
-        kubernetes)
-            deploy_kubernetes
+        push)
+            check_prerequisites
+            check_docker_login
+            push_images
+            ;;
+        k8s)
+            check_prerequisites
+            check_k8s_connection
+            deploy_to_k8s
+            show_deployment_status
+            ;;
+        status)
+            check_prerequisites
+            check_k8s_connection
+            show_deployment_status
+            ;;
+        port-forward)
+            check_prerequisites
+            check_k8s_connection
+            setup_port_forwarding
+            ;;
+        cleanup)
+            check_prerequisites
+            check_k8s_connection
+            cleanup_deployment
+            ;;
+        help|--help|-h)
+            show_help
             ;;
         *)
-            log_error "Invalid deployment type: $DEPLOYMENT_TYPE"
+            log_error "Unknown action: $action"
             show_help
             exit 1
             ;;
     esac
-    
-    echo ""
-    log_info "Deployment completed successfully! 🎉"
 }
 
-# Run main function
+# Execute main function with all arguments
 main "$@" 
