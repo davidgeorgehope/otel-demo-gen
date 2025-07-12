@@ -834,9 +834,11 @@ class K8sMetricsGenerator:
                     "severityNumber": 9 if event["type"] == "Normal" else 13,
                     "body": {
                         "stringValue": message,  # Keep simple message for display
-                        # CRITICAL FIX: Change "structured" to match Elastic's expected format
-                        # Elastic looks for these fields directly in body
-                        **structured_body  # Flatten structured data into body
+                        # CRITICAL FIX: Use kvlistValue to properly structure nested objects
+                        # This maintains the nested structure instead of converting to strings
+                        "kvlistValue": {
+                            "values": self._format_nested_attributes(structured_body)
+                        }
                     },
                     "attributes": [
                         {"key": "k8s.event.type", "value": {"stringValue": event["type"]}},
@@ -895,6 +897,51 @@ class K8sMetricsGenerator:
         formatted = []
         for key, value in attrs.items():
             if isinstance(value, str):
+                val_dict = {"stringValue": value}
+            elif isinstance(value, bool):
+                val_dict = {"boolValue": value}
+            elif isinstance(value, int):
+                val_dict = {"intValue": value}
+            elif isinstance(value, float):
+                val_dict = {"doubleValue": value}
+            else:
+                val_dict = {"stringValue": str(value)}
+            formatted.append({"key": key, "value": val_dict})
+        return formatted
+
+    def _format_nested_attributes(self, attrs: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Convert nested attributes dict to OTLP format, preserving structure."""
+        formatted = []
+        for key, value in attrs.items():
+            if isinstance(value, dict):
+                # For nested dictionaries, create a kvlistValue
+                val_dict = {
+                    "kvlistValue": {
+                        "values": self._format_nested_attributes(value)
+                    }
+                }
+            elif isinstance(value, list):
+                # For arrays, create arrayValue
+                array_values = []
+                for item in value:
+                    if isinstance(item, dict):
+                        array_values.append({
+                            "kvlistValue": {
+                                "values": self._format_nested_attributes(item)
+                            }
+                        })
+                    elif isinstance(item, str):
+                        array_values.append({"stringValue": item})
+                    elif isinstance(item, bool):
+                        array_values.append({"boolValue": item})
+                    elif isinstance(item, int):
+                        array_values.append({"intValue": item})
+                    elif isinstance(item, float):
+                        array_values.append({"doubleValue": item})
+                    else:
+                        array_values.append({"stringValue": str(item)})
+                val_dict = {"arrayValue": {"values": array_values}}
+            elif isinstance(value, str):
                 val_dict = {"stringValue": value}
             elif isinstance(value, bool):
                 val_dict = {"boolValue": value}
