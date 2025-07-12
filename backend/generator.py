@@ -102,7 +102,7 @@ class TelemetryGenerator:
         print("Kubernetes metrics generation loop started.")
         while not self._stop_event.is_set():
             self.generate_and_send_k8s_metrics()
-            self.generate_and_send_k8s_events()  # Also send K8s events
+            self.generate_and_send_k8s_logs()  # Also send K8s logs
             
             # Wait for the interval or until stop event is set
             self._stop_event.wait(k8s_metrics_interval)
@@ -119,17 +119,17 @@ class TelemetryGenerator:
         if k8s_metrics_payload.get("resourceMetrics"):
             self._send_payload(f"{self.collector_url}v1/metrics", k8s_metrics_payload, "k8s-metrics")
 
-    def generate_and_send_k8s_events(self):
-        """Generates and sends Kubernetes event logs."""
+    def generate_and_send_k8s_logs(self):
+        """Generates and sends Kubernetes structured logs."""
         if not self.collector_url:
-            print("Warning: OTLP endpoint not configured. Cannot send k8s events.")
+            print("Warning: OTLP endpoint not configured. Cannot send k8s logs.")
             return
             
-        # Generate events occasionally (not every cycle to avoid spam)
-        if random.random() < 0.3:  # 30% chance per cycle
-            k8s_events_payload = self.k8s_generator.generate_k8s_events_payload()
-            if k8s_events_payload.get("resourceLogs"):
-                self._send_payload(f"{self.collector_url}v1/logs", k8s_events_payload, "k8s-events")
+        # Generate logs occasionally (not every cycle to avoid spam)
+        if random.random() < 0.9:  # 30% chance per cycle
+            k8s_logs_payload = self.k8s_generator.generate_k8s_logs_payload()
+            if k8s_logs_payload.get("resourceLogs"):
+                self._send_payload(f"{self.collector_url}v1/logs", k8s_logs_payload, "k8s-logs")
 
 
 
@@ -297,12 +297,12 @@ class TelemetryGenerator:
                     scope_name = payload["resourceMetrics"][0].get("scopeMetrics", [{}])[0].get("scope", {}).get("name", "unknown")
                     print(f"  📊 Sent {metric_count} k8s metrics from {resource_count} resources with scope: {scope_name}")
             
-            # Debug: Log payload structure for K8s events
-            if signal_name == "k8s-events" and payload.get("resourceLogs"):
+            # Debug: Log payload structure for K8s logs
+            if signal_name == "k8s-logs" and payload.get("resourceLogs"):
                 resource_count = len(payload["resourceLogs"])
-                total_events = sum(len(rl.get("scopeLogs", [{}])[0].get("logRecords", [])) for rl in payload["resourceLogs"])
-                if total_events > 0:
-                    print(f"  📝 Sent {total_events} k8s events from {resource_count} resources")
+                total_logs = sum(len(rl.get("scopeLogs", [{}])[0].get("logRecords", [])) for rl in payload["resourceLogs"])
+                if total_logs > 0:
+                    print(f"  📝 Sent {total_logs} k8s logs from {resource_count} resources")
             
         except httpx.RequestError as e:
             print(f"❌ Error sending {signal_name} to collector: {e}")

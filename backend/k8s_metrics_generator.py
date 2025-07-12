@@ -671,8 +671,7 @@ class K8sMetricsGenerator:
         
         return deployment_resources
 
-    def generate_k8s_events_payload(self) -> Dict[str, List[Any]]:
-        """Generate OTLP logs payload for Kubernetes events - FIXED for Elastic."""
+    def generate_k8s_logs_payload(self) -> Dict[str, List[Any]]:
         resource_logs = []
         current_time_ns = str(time.time_ns())
         
