@@ -7,3 +7,4 @@ python-dotenv
 openai
 requests
 boto3
+h2
