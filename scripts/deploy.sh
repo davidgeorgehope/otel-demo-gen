@@ -51,9 +51,7 @@ check_prerequisites() {
         missing_tools+=("kubectl")
     fi
     
-    if ! command -v kustomize &> /dev/null; then
-        missing_tools+=("kustomize")
-    fi
+
     
     if [ ${#missing_tools[@]} -ne 0 ]; then
         log_error "Missing required tools: ${missing_tools[*]}"
@@ -132,12 +130,9 @@ check_k8s_connection() {
 deploy_to_k8s() {
     log_info "Deploying to Kubernetes..."
     
-    # Navigate to k8s directory
-    cd "$PROJECT_ROOT/k8s"
-    
-    # Apply the kustomization
+    # Apply the Kubernetes manifests
     log_info "Applying Kubernetes manifests..."
-    kustomize build . | kubectl apply -f -
+    kubectl apply -f "$PROJECT_ROOT/k8s/"
     
     # Wait for deployments to be ready
     log_info "Waiting for deployments to be ready..."
@@ -266,8 +261,7 @@ setup_port_forwarding() {
 cleanup_deployment() {
     log_info "Cleaning up deployment..."
     
-    cd "$PROJECT_ROOT/k8s"
-    kustomize build . | kubectl delete -f - --ignore-not-found=true
+    kubectl delete -f "$PROJECT_ROOT/k8s/" --ignore-not-found=true
     
     log_success "Deployment cleanup completed"
 }
@@ -302,7 +296,6 @@ EXAMPLES:
  PREREQUISITES:
      - Docker installed and logged in to Docker Hub
      - kubectl configured with cluster access
-     - kustomize installed
      - Git (for version tagging)
      - Cloud provider LoadBalancer support (AWS ELB, GCP LB, Azure LB, etc.)
 

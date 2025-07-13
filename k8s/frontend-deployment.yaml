@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
       - name: frontend
-        image: otel-demo-frontend:latest
+        image: djhope99/otel-demo-frontend:latest
         ports:
         - containerPort: 80
           name: http
