@@ -5,7 +5,7 @@ metadata:
   namespace: otel-demo
 data:
   # LLM Provider configuration
-  LLM_PROVIDER: "openai"
+  LLM_PROVIDER: "bedrock"
   OPENAI_MODEL: "o3"
   BEDROCK_MODEL_ID: "us.anthropic.claude-sonnet-4-20250514-v1:0"
   
