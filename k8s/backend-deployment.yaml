@@ -46,26 +46,31 @@ spec:
             secretKeyRef:
               name: otel-demo-secrets
               key: OPENAI_API_KEY
+              optional: true
         - name: AWS_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:
               name: otel-demo-secrets
               key: AWS_ACCESS_KEY_ID
+              optional: true
         - name: AWS_SECRET_ACCESS_KEY
           valueFrom:
             secretKeyRef:
               name: otel-demo-secrets
               key: AWS_SECRET_ACCESS_KEY
+              optional: true
         - name: AWS_REGION
           valueFrom:
             secretKeyRef:
               name: otel-demo-secrets
               key: AWS_REGION
+              optional: true
         - name: OTEL_COLLECTOR_URL
           valueFrom:
             secretKeyRef:
               name: otel-demo-secrets
               key: OTEL_COLLECTOR_URL
+              optional: true
         resources:
           requests:
             memory: "256Mi"

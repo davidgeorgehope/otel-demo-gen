@@ -44,10 +44,6 @@ spec:
           periodSeconds: 5
         securityContext:
           allowPrivilegeEscalation: false
-          runAsNonRoot: true
-          runAsUser: 101  # nginx user
           capabilities:
             drop:
-            - ALL
-      securityContext:
-        fsGroup: 101 
+            - ALL 
