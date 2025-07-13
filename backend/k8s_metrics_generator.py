@@ -853,7 +853,7 @@ class K8sMetricsGenerator:
                         {"key": "k8s.event.object.namespace", "value": {"stringValue": pod_data['namespace']}},
                         {"key": "k8s.event.object.uid", "value": {"stringValue": pod_data['pod_uid']}},
                         {"key": "k8s.event.count", "value": {"intValue": random.randint(1, 5)}},
-                        {"key": "event.dataset", "value": {"stringValue": "generic.otel"}},
+                        {"key": "event.dataset", "value": {"stringValue": "generic"}},
                         {"key": "event.module", "value": {"stringValue": "kubernetes"}},
                     ]
                 }
@@ -867,9 +867,8 @@ class K8sMetricsGenerator:
                     "cloud.provider": pod_data['cloud_provider'],
                     "cloud.platform": pod_data['cloud_platform'],
                     "cloud.region": pod_data['cloud_region'],
-                    "event.dataset": "generic.otel",
                     "data_stream.type": "logs",
-                    "data_stream.dataset": "generic.otel",
+                    "data_stream.dataset": "generic",
                     "data_stream.namespace": "default"
                 })
                 

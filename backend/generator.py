@@ -193,7 +193,7 @@ class TelemetryGenerator:
             
             # CRITICAL: Data stream attributes for Elastic routing
             "data_stream.type": telemetry_type,
-            "data_stream.dataset": "generic.otel", 
+            "data_stream.dataset": "generic", 
             "data_stream.namespace": "default"
         }
 
