@@ -132,7 +132,15 @@ deploy_to_k8s() {
     
     # Apply the Kubernetes manifests
     log_info "Applying Kubernetes manifests..."
-    kubectl apply -f "$PROJECT_ROOT/k8s/"
+    
+    # Apply in specific order to handle dependencies
+    kubectl apply -f "$PROJECT_ROOT/k8s/namespace.yaml"
+    kubectl apply -f "$PROJECT_ROOT/k8s/secret.yaml"
+    kubectl apply -f "$PROJECT_ROOT/k8s/configmap.yaml"
+    kubectl apply -f "$PROJECT_ROOT/k8s/backend-deployment.yaml"
+    kubectl apply -f "$PROJECT_ROOT/k8s/backend-service.yaml"
+    kubectl apply -f "$PROJECT_ROOT/k8s/frontend-deployment.yaml"
+    kubectl apply -f "$PROJECT_ROOT/k8s/frontend-service.yaml"
     
     # Wait for deployments to be ready
     log_info "Waiting for deployments to be ready..."
@@ -261,7 +269,14 @@ setup_port_forwarding() {
 cleanup_deployment() {
     log_info "Cleaning up deployment..."
     
-    kubectl delete -f "$PROJECT_ROOT/k8s/" --ignore-not-found=true
+    # Delete in reverse order (deployments first, then supporting resources)
+    kubectl delete -f "$PROJECT_ROOT/k8s/frontend-service.yaml" --ignore-not-found=true
+    kubectl delete -f "$PROJECT_ROOT/k8s/frontend-deployment.yaml" --ignore-not-found=true
+    kubectl delete -f "$PROJECT_ROOT/k8s/backend-service.yaml" --ignore-not-found=true
+    kubectl delete -f "$PROJECT_ROOT/k8s/backend-deployment.yaml" --ignore-not-found=true
+    kubectl delete -f "$PROJECT_ROOT/k8s/configmap.yaml" --ignore-not-found=true
+    kubectl delete -f "$PROJECT_ROOT/k8s/secret.yaml" --ignore-not-found=true
+    kubectl delete -f "$PROJECT_ROOT/k8s/namespace.yaml" --ignore-not-found=true
     
     log_success "Deployment cleanup completed"
 }
