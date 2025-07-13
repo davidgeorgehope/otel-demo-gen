@@ -70,8 +70,11 @@ class TelemetryGenerator:
         self.k8s_generator = K8sMetricsGenerator(config)
         
         # Pre-generate resource attributes for each service (using k8s data)
-        self.service_resource_attributes = {
-            s.name: self._generate_resource_attributes(s) for s in self.config.services
+        self.service_resource_attributes_metrics = {
+            s.name: self._generate_resource_attributes(s, "metrics") for s in self.config.services
+        }
+        self.service_resource_attributes_traces = {
+            s.name: self._generate_resource_attributes(s, "traces") for s in self.config.services
         }
         self.service_operations_map = {
             s.name: {op.name: op for op in s.operations} 
@@ -119,24 +122,31 @@ class TelemetryGenerator:
         if k8s_metrics_payload.get("resourceMetrics"):
             self._send_payload(f"{self.collector_url}v1/metrics", k8s_metrics_payload, "k8s-metrics")
 
-    def generate_and_send_k8s_logs(self):
-        """Generates and sends Kubernetes structured logs."""
-        if not self.collector_url:
+    def generate_and_send_k8s_logs(self, dry_run=False):
+        """
+        Generates and sends Kubernetes structured logs.
+        If dry_run is True, it returns the payload as a JSON string instead of sending it.
+        """
+        if not self.collector_url and not dry_run:
             print("Warning: OTLP endpoint not configured. Cannot send k8s logs.")
             return
             
-        # Generate logs occasionally (not every cycle to avoid spam)
-        if random.random() < 0.9:  # 30% chance per cycle
+        # Generate logs occasionally, but always for a dry run
+        if dry_run or random.random() < 0.9:
             k8s_logs_payload = self.k8s_generator.generate_k8s_logs_payload()
             if k8s_logs_payload.get("resourceLogs"):
-                self._send_payload(f"{self.collector_url}v1/logs", k8s_logs_payload, "k8s-logs")
+                if dry_run:
+                    return json.dumps(k8s_logs_payload, indent=2)
+                else:
+                    self._send_payload(f"{self.collector_url}v1/logs", k8s_logs_payload, "k8s-logs")
+        return None
 
 
 
 
 
-    def _generate_resource_attributes(self, service: Service) -> Dict[str, Any]:
-        """Generates resource attributes for regular metrics compatible with collector processors."""
+    def _generate_resource_attributes(self, service: Service, telemetry_type: str = "metrics") -> Dict[str, Any]:
+        """Generates resource attributes for telemetry data compatible with collector processors."""
         lang = service.language.lower()
         runtime_info = self.RUNTIME_INFO.get(lang, {"name": lang, "version": "1.0.0"})
         
@@ -166,14 +176,25 @@ class TelemetryGenerator:
             "cloud.availability_zone": pod_data['zone'],
             "deployment.environment": "production",
             "host.name": pod_data['node_name'],
+            "host.architecture": "amd64",  # Elasticsearch exporter maps this to host.architecture 
             "os.type": "linux",
             "os.description": pod_data['os_description'],
+            
+            # Container attributes for better ECS mapping
+            "container.image.name": f"{service.name}:latest",
+            "container.image.tag": "latest", 
+            "container.image.tags": ["latest", "v1.2.3"],  # Elasticsearch exporter maps this to container.image.tag
             
             # Basic k8s attributes for regular app metrics
             "k8s.cluster.name": pod_data['cluster_name'],
             "k8s.namespace.name": pod_data['namespace'],
             "k8s.pod.name": pod_data['pod_name'],
-            "k8s.node.name": pod_data['node_name']
+            "k8s.node.name": pod_data['node_name'],
+            
+            # CRITICAL: Data stream attributes for Elastic routing
+            "data_stream.type": telemetry_type,
+            "data_stream.dataset": "generic.otel", 
+            "data_stream.namespace": "default"
         }
 
     def _generate_telemetry(self):
@@ -437,7 +458,7 @@ class TelemetryGenerator:
                 continue
             
             resource_attrs = self._format_attributes(
-                self.service_resource_attributes.get(service_name, {"service.name": service_name})
+                self.service_resource_attributes_traces.get(service_name, {"service.name": service_name})
             )
 
             otlp_spans = []
@@ -462,7 +483,10 @@ class TelemetryGenerator:
             }]
 
             resource_spans.append({
-                "resource": {"attributes": resource_attrs},
+                "resource": {
+                    "attributes": resource_attrs,
+                    "schemaUrl": "https://opentelemetry.io/schemas/1.35.0"
+                },
                 "scopeSpans": scope_spans,
             })
             
@@ -483,7 +507,7 @@ class TelemetryGenerator:
                 continue
 
             resource_attrs = self._format_attributes(
-                self.service_resource_attributes.get(service_name, {"service.name": service_name})
+                self.service_resource_attributes_traces.get(service_name, {"service.name": service_name})
             )
 
             log_records = []
@@ -506,7 +530,11 @@ class TelemetryGenerator:
                         "body": {"stringValue": f"Operation '{span['name']}' failed unexpectedly."},
                         "traceId": span["traceId"],
                         "spanId": span["spanId"],
-                        "attributes": self._format_attributes({"exception.type": "RuntimeException", "exception.message": "An artificial error occurred"}),
+                        "attributes": self._format_attributes({
+                            "exception.type": "RuntimeException", 
+                            "exception.message": "An artificial error occurred",
+                            "exception.stacktrace": "java.lang.RuntimeException: An artificial error occurred\n\tat com.example.Service.process(Service.java:42)\n\tat com.example.Controller.handle(Controller.java:23)"
+                        }),
                     }
                     log_records.append(error_log)
             
@@ -519,7 +547,10 @@ class TelemetryGenerator:
             }]
 
             resource_logs.append({
-                "resource": {"attributes": resource_attrs},
+                "resource": {
+                    "attributes": resource_attrs,
+                    "schemaUrl": "https://opentelemetry.io/schemas/1.35.0"
+                },
                 "scopeLogs": scope_logs,
             })
 
@@ -545,13 +576,13 @@ class TelemetryGenerator:
 
             self._request_counters[service.name] += random.randint(5, 20)
             metrics.append(self._create_sum_metric("http.server.request.count", "requests", True, [
-                {"timeUnixNano": current_time_ns, "asInt": str(self._request_counters[service.name])}
+                {"timeUnixNano": current_time_ns, "startTimeUnixNano": str(time.time_ns() - 3600_000_000_000), "asInt": str(self._request_counters[service.name])}
             ]))
 
             if random.random() < self.config.telemetry.error_rate:
                 self._error_counters[service.name] += 1
             metrics.append(self._create_sum_metric("http.server.request.error.count", "errors", True, [
-                {"timeUnixNano": current_time_ns, "asInt": str(self._error_counters[service.name])}
+                {"timeUnixNano": current_time_ns, "startTimeUnixNano": str(time.time_ns() - 3600_000_000_000), "asInt": str(self._error_counters[service.name])}
             ]))
 
             # --- Runtime-Specific Metrics ---
@@ -559,7 +590,7 @@ class TelemetryGenerator:
             if lang == "java":
                 self._runtime_counters[service.name] += random.randint(0, 2)
                 metrics.append(self._create_sum_metric("jvm.gc.collection_count", "collections", True, [
-                    {"timeUnixNano": current_time_ns, "asInt": str(self._runtime_counters[service.name])}
+                    {"timeUnixNano": current_time_ns, "startTimeUnixNano": str(time.time_ns() - 3600_000_000_000), "asInt": str(self._runtime_counters[service.name])}
                 ]))
             elif lang == "go":
                 metrics.append(self._create_gauge_metric("go.goroutines", "goroutines", [
@@ -572,15 +603,18 @@ class TelemetryGenerator:
             elif lang == "python":
                  self._runtime_counters[service.name] += random.randint(0, 3)
                  metrics.append(self._create_sum_metric("python.gc.collections", "collections", True, [
-                    {"timeUnixNano": current_time_ns, "asInt": str(self._runtime_counters[service.name])}
+                    {"timeUnixNano": current_time_ns, "startTimeUnixNano": str(time.time_ns() - 3600_000_000_000), "asInt": str(self._runtime_counters[service.name])}
                  ]))
             
             resource_attrs = self._format_attributes(
-                self.service_resource_attributes.get(service.name, {"service.name": service.name})
+                self.service_resource_attributes_metrics.get(service.name, {"service.name": service.name})
             )
             scope_metrics = [{"scope": {"name": "otel-demo-generator"}, "metrics": metrics}]
             resource_metrics.append({
-                "resource": {"attributes": resource_attrs},
+                "resource": {
+                    "attributes": resource_attrs,
+                    "schemaUrl": "https://opentelemetry.io/schemas/1.35.0"
+                },
                 "scopeMetrics": scope_metrics,
             })
 
@@ -983,5 +1017,54 @@ telemetry:
         if generator:
             generator.stop()
 
+def test_k8s_log_generation():
+    """Tests the generation of K8s logs payload by printing it."""
+    print("\n--- Running K8s Log Generation Test ---")
+    yaml_content = """
+services:
+  - name: api-gateway
+    language: go
+    role: frontend
+    depends_on:
+      - service: orders-service
+        protocol: grpc
+  - name: orders-service
+    language: java
+    role: backend
+    depends_on:
+      - db: orders-db
+databases:
+  - name: orders-db
+    type: postgres
+telemetry:
+  trace_rate: 1
+  error_rate: 0
+  metrics_interval: 10
+  include_logs: true
+"""
+    generator = None
+    try:
+        config_data = yaml.safe_load(yaml_content)
+        scenario_config = ScenarioConfig(**config_data)
+        # OTLP endpoint can be None for a dry run
+        generator = TelemetryGenerator(config=scenario_config, otlp_endpoint=None)
+        
+        # Generate and print the k8s logs payload
+        logs_payload_json = generator.generate_and_send_k8s_logs(dry_run=True)
+        
+        if logs_payload_json:
+            print("Successfully generated K8s logs payload:")
+            print(logs_payload_json)
+        else:
+            print("K8s logs payload generation did not produce output.")
+
+    except (yaml.YAMLError, Exception) as e:
+        print(f"Error during K8s log generation test: {e}")
+    finally:
+        if generator and generator.is_running():
+            generator.stop()
+
+
 if __name__ == "__main__":
-    main_test() 
+    main_test()
+    test_k8s_log_generation() 

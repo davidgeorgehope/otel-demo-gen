@@ -165,6 +165,7 @@ class K8sMetricsGenerator:
             "container.id": container_id,  # This was missing at resource level
             "container.image.name": f"{service.name}:latest",
             "container.image.tag": "latest",
+            "container.image.tags": ["latest", "v1.2.3"],  # Elasticsearch exporter maps this to container.image.tag
             "k8s.container.status.last_terminated_reason": random.choice([
                 "Completed", "OOMKilled", "Error", "ContainerCannotRun"
             ]) if random.random() < 0.1 else "Completed",
@@ -233,6 +234,11 @@ class K8sMetricsGenerator:
             **k8s_attributes,
             **k8s_labels,
             **k8s_annotations,
+            
+            # CRITICAL: Data stream attributes for Elastic routing
+            "data_stream.type": "metrics",
+            "data_stream.dataset": "kubernetes.container", 
+            "data_stream.namespace": "default"
         }
 
     def generate_k8s_metrics_payload(self) -> Dict[str, List[Any]]:
@@ -691,6 +697,13 @@ class K8sMetricsGenerator:
                 "weight": 0.15
             },
             {
+                "type": "Warning",
+                "reason": "Failed",
+                "message": "Error: container failed to start",
+                "object_kind": "Pod",
+                "weight": 0.08
+            },
+            {
                 "type": "Normal",
                 "reason": "Scheduled",
                 "message": "Successfully assigned {namespace}/{pod_name} to {node_name}",
@@ -774,58 +787,50 @@ class K8sMetricsGenerator:
                 
                 event_time_ns = str(int(current_time_ns) - random.randint(0, 3600000000000))
                 
+                # Convert event time to ISO format for K8s fields
+                event_time_iso = datetime.fromtimestamp(
+                    int(event_time_ns) / 1_000_000_000, 
+                    timezone.utc
+                ).isoformat().replace('+00:00', 'Z')
+                
+                # Generate event name and resource versions
+                event_name = f"{pod_data['pod_name']}.{secrets.token_hex(8)}"
+                resource_version = str(random.randint(1000000, 9999999))
+                regarding_resource_version = str(random.randint(1000000, 9999999))
+                
                 # CRITICAL FIX: Restructure body for Elastic ingestion pipeline
                 # Elastic expects the structured data at the top level of body
+                # Create structured body matching real K8s event format
                 structured_body = {
-                    # Top-level object structure that Elastic can parse
-                    "object": {
-                        "kind": event["object_kind"],  # FIXED: Added missing field
-                        "name": pod_data['pod_name'],
-                        "reason": event["reason"],     # FIXED: Added missing field
-                        "note": message,               # FIXED: Added missing field
-                        "metadata": {
-                            "name": pod_data['pod_name'],
-                            "namespace": pod_data['namespace'],  # FIXED: Added missing field
-                            "uid": pod_data['pod_uid'],
-                            "creationTimestamp": pod_data['pod_start_time'],  # FIXED: Added missing field
-                            "labels": {
-                                "app": service.name,
-                                "version": "v1.2.3",
-                                "pod-template-hash": secrets.token_hex(4)
-                            }
-                        },
-                        "regarding": {
-                            "kind": event["object_kind"],      # FIXED: Added missing field
-                            "name": pod_data['pod_name'],      # FIXED: Added missing field
-                            "namespace": pod_data['namespace'],
-                            "uid": pod_data['pod_uid'],
-                            "apiVersion": "v1"
-                        }
-                    },
-                    # Event-level fields
-                    "type": event["type"],
-                    "reason": event["reason"],
-                    "message": message,
-                    "eventTime": event_time_ns,
-                    "firstTimestamp": event_time_ns,
-                    "lastTimestamp": event_time_ns,
-                    "count": random.randint(1, 5),
-                    "source": {
-                        "component": random.choice(["kubelet", "scheduler", "controller-manager", "kube-proxy"]),
-                        "host": pod_data['node_name']
-                    },
-                    "reportingController": "k8s.io/kubelet",
-                    "reportingInstance": pod_data['node_name'],
-                    
-                    # Alternative involvedObject structure for compatibility
-                    "involvedObject": {
-                        "kind": event["object_kind"],
-                        "name": pod_data['pod_name'],
-                        "namespace": pod_data['namespace'],
-                        "uid": pod_data['pod_uid'],
-                        "apiVersion": "v1",
-                        "resourceVersion": str(random.randint(1000000, 9999999))
-                    }
+                    "object.apiVersion": "events.k8s.io/v1",
+                    "object.deprecatedCount": random.randint(1, 10),
+                    "object.deprecatedFirstTimestamp": event_time_iso,
+                    "object.deprecatedLastTimestamp": event_time_iso,
+                    "object.deprecatedSource.component": random.choice(["kubelet", "scheduler", "controller-manager", "kube-proxy"]),
+                    "object.deprecatedSource.host": pod_data['node_name'],
+                    "object.kind": "Event",
+                    "object.metadata.creationTimestamp": event_time_iso,
+                    "object.metadata.managedFields.apiVersion": "v1",
+                    "object.metadata.managedFields.fieldsType": "FieldsV1",
+                    "object.metadata.managedFields.manager": "kubelet",
+                    "object.metadata.managedFields.operation": "Update",
+                    "object.metadata.managedFields.time": event_time_iso,
+                    "object.metadata.name": event_name,
+                    "object.metadata.namespace": pod_data['namespace'],
+                    "object.metadata.resourceVersion": resource_version,
+                    "object.metadata.uid": str(uuid.uuid4()),
+                    "object.note": message,
+                    "object.reason": event["reason"],
+                    "object.regarding.apiVersion": "v1",
+                    "object.regarding.kind": event["object_kind"],
+                    "object.regarding.name": pod_data['pod_name'],
+                    "object.regarding.namespace": pod_data['namespace'],
+                    "object.regarding.resourceVersion": regarding_resource_version,
+                    "object.regarding.uid": pod_data['pod_uid'],
+                    "object.reportingController": "kubelet",
+                    "object.reportingInstance": pod_data['node_name'],
+                    "object.type": event["type"],
+                    "type": "MODIFIED"
                 }
                 
                 log_record = {
@@ -833,14 +838,14 @@ class K8sMetricsGenerator:
                     "severityText": "INFO" if event["type"] == "Normal" else "WARN",
                     "severityNumber": 9 if event["type"] == "Normal" else 13,
                     "body": {
-                        "stringValue": message,  # Keep simple message for display
-                        # CRITICAL FIX: Use kvlistValue to properly structure nested objects
-                        # This maintains the nested structure instead of converting to strings
-                        "kvlistValue": {
-                            "values": self._format_nested_attributes(structured_body)
-                        }
+
+                                    "kvlistValue": {                  # ✅ map ⇒ flat keys
+                "values": self._format_attributes(structured_body)
+            }
                     },
                     "attributes": [
+                        {"key": "event.name", "value": {"stringValue": event_name}},
+                        {"key": "event.domain", "value": {"stringValue": "k8s"}},
                         {"key": "k8s.event.type", "value": {"stringValue": event["type"]}},
                         {"key": "k8s.event.reason", "value": {"stringValue": event["reason"]}},
                         {"key": "k8s.event.object.kind", "value": {"stringValue": event["object_kind"]}},
@@ -848,7 +853,7 @@ class K8sMetricsGenerator:
                         {"key": "k8s.event.object.namespace", "value": {"stringValue": pod_data['namespace']}},
                         {"key": "k8s.event.object.uid", "value": {"stringValue": pod_data['pod_uid']}},
                         {"key": "k8s.event.count", "value": {"intValue": random.randint(1, 5)}},
-                        {"key": "event.dataset", "value": {"stringValue": "kubernetes.events"}},
+                        {"key": "event.dataset", "value": {"stringValue": "generic.otel"}},
                         {"key": "event.module", "value": {"stringValue": "kubernetes"}},
                     ]
                 }
@@ -862,9 +867,9 @@ class K8sMetricsGenerator:
                     "cloud.provider": pod_data['cloud_provider'],
                     "cloud.platform": pod_data['cloud_platform'],
                     "cloud.region": pod_data['cloud_region'],
-                    "event.dataset": "kubernetes.events",
+                    "event.dataset": "generic.otel",
                     "data_stream.type": "logs",
-                    "data_stream.dataset": "kubernetes.events",
+                    "data_stream.dataset": "generic.otel",
                     "data_stream.namespace": "default"
                 })
                 
