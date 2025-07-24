@@ -555,19 +555,28 @@ class K8sMetricsGenerator:
 
     def _generate_node_metrics(self, current_time_ns: str) -> List[Dict[str, Any]]:
         """Generate node-level metrics."""
+        # CRITICAL FIX: Generate CPU values for realistic dashboard percentages (100s of %)
+        # Target: cpu.usage / allocatable_cpu should yield 2-8 (200%-800%)
+        allocatable_cores = random.uniform(2.0, 8.0)
+        utilization_fraction = random.uniform(0.1, 0.8)
+        
+        # Scale to get hundreds of percent - further reduced scaling
+        # Using much smaller scaling: 4 cores * 50% * 100 = 200ns → 200/4 = 50 (50%)
+        cpu_usage_ns = int(allocatable_cores * utilization_fraction * 10)
+        
         return [
-            # CPU metrics
+            # CPU metrics - Fixed scaling
             self._create_gauge_metric("k8s.node.cpu.usage", "ns", [{
                 "timeUnixNano": current_time_ns,
-                "asInt": str(random.randint(1000000000, 5000000000))
+                "asInt": str(cpu_usage_ns)
             }]),
             self._create_gauge_metric("k8s.node.allocatable_cpu", "1", [{
                 "timeUnixNano": current_time_ns,
-                "asDouble": random.uniform(2.0, 8.0)
+                "asDouble": allocatable_cores
             }]),
             self._create_gauge_metric("k8s.node.cpu.utilization", "1", [{
                 "timeUnixNano": current_time_ns,
-                "asDouble": random.uniform(0.1, 0.8)
+                "asDouble": utilization_fraction
             }]),
             
             # Memory metrics  
