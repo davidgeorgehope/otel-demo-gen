@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-demo-backend
+
+  labels:
+    app: otel-demo-backend
+    component: backend
+spec:
+  selector:
+    app: otel-demo-backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  type: {{ .Values.service.type }}

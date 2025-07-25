@@ -1,0 +1,46 @@
+namespace: otel-demo
+
+backend:
+  image:
+    repository: djhope99/otel-demo-backend
+    tag: latest
+  replicas: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+frontend:
+  image:
+    repository: djhope99/otel-demo-frontend
+    tag: latest
+  replicas: 2
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "100m"
+
+config:
+  llmProvider: bedrock
+  openaiModel: o3
+  bedrockModelId: us.anthropic.claude-sonnet-4-20250514-v1:0
+  logLevel: INFO
+  corsOrigins: http://localhost:3000,https://your-domain.com
+  backendPort: 8000
+  backendHost: 0.0.0.0
+
+secrets:
+  openaiApiKey: ""
+  awsAccessKeyId: ""
+  awsSecretAccessKey: ""
+  awsRegion: us-east-1
+  otelCollectorUrl: http://localhost:4318
+
+service:
+  type: LoadBalancer

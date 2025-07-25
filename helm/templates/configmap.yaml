@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-demo-config
+
+data:
+  LLM_PROVIDER: "{{ .Values.config.llmProvider }}"
+  OPENAI_MODEL: "{{ .Values.config.openaiModel }}"
+  BEDROCK_MODEL_ID: "{{ .Values.config.bedrockModelId }}"
+  LOG_LEVEL: "{{ .Values.config.logLevel }}"
+  CORS_ORIGINS: "{{ .Values.config.corsOrigins }}"
+  BACKEND_PORT: "{{ .Values.config.backendPort }}"
+  BACKEND_HOST: "{{ .Values.config.backendHost }}"
