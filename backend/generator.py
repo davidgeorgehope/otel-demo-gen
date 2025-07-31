@@ -343,7 +343,10 @@ class TelemetryGenerator:
             elif isinstance(value, bool):
                 val_dict = {"boolValue": value}
             elif isinstance(value, int):
-                val_dict = {"intValue": value}
+                # According to the OTLP/JSON specification, intValue must be a *string* representation of
+                # the integer to avoid 64-bit precision loss in JavaScript environments. Sending the raw
+                # integer results in a 400 Bad Request from strict back-ends (e.g., Elastic APM).  
+                val_dict = {"intValue": str(value)}
             elif isinstance(value, float):
                 val_dict = {"doubleValue": value}
             else:
@@ -466,7 +469,7 @@ class TelemetryGenerator:
                 otlp_spans.append({
                     "traceId": span["traceId"],
                     "spanId": span["spanId"],
-                    "parentSpanId": span.get("parentSpanId", ""),
+                    **({"parentSpanId": span["parentSpanId"]} if span.get("parentSpanId") else {}),
                     "name": span["name"],
                     "kind": self.SPAN_KIND_MAP.get(span["kind"], 0),
                     "startTimeUnixNano": span["startTimeUnixNano"],
