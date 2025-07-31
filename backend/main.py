@@ -1,7 +1,7 @@
 import yaml
 import uuid
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Response, Body
+from fastapi import FastAPI, HTTPException, Response, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, List
 from pydantic import BaseModel
@@ -35,10 +35,15 @@ class JobInfo(BaseModel):
     config: dict
     status: str = "running"
     otlp_endpoint: Optional[str] = None
+    user: Optional[str] = "Not logged in"
 
 # Global job storage and active generators
 active_jobs: Dict[str, JobInfo] = {}
 active_generators: Dict[str, TelemetryGenerator] = {}
+
+def get_user_from_request(request: Request) -> str:
+    """Extract user from X-Forwarded-User header, defaulting to 'Not logged in'."""
+    return request.headers.get("X-Forwarded-User", "Not logged in")
 
 # --- Models ---
 class GenerateRequest(BaseModel):
@@ -57,6 +62,7 @@ class JobResponse(BaseModel):
     config: dict
     status: str
     otlp_endpoint: Optional[str] = None
+    user: Optional[str] = "Not logged in"
 
 class JobListResponse(BaseModel):
     jobs: List[JobResponse]
@@ -66,6 +72,12 @@ class StatusResponse(BaseModel):
     running: bool
     config: Optional[dict] = None
     job_id: Optional[str] = None
+
+class RestartRequest(BaseModel):
+    config: Optional[dict] = None
+    description: Optional[str] = None
+    otlp_endpoint: Optional[str] = None
+    api_key: Optional[str] = None
 
 @app.post("/generate-config", response_model=dict)
 async def generate_config(request: GenerateRequest):
@@ -101,7 +113,7 @@ async def generate_config(request: GenerateRequest):
         raise HTTPException(status_code=500, detail=f"Failed to generate config: {e}")
 
 @app.post("/start", response_model=dict)
-async def start_generation(request: StartRequest):
+async def start_generation(start_request: StartRequest, request: Request):
     """
     Starts a new telemetry generator job with a given configuration.
     """
@@ -109,24 +121,28 @@ async def start_generation(request: StartRequest):
         # Generate unique job ID
         job_id = str(uuid.uuid4())[:8]
         
+        # Get user from request headers
+        user = get_user_from_request(request)
+        
         # Validate configuration
-        scenario_config = ScenarioConfig(**request.config)
+        scenario_config = ScenarioConfig(**start_request.config)
         
         # Create and start generator
         generator = TelemetryGenerator(
             config=scenario_config,
-            otlp_endpoint=request.otlp_endpoint,
-            api_key=request.api_key
+            otlp_endpoint=start_request.otlp_endpoint,
+            api_key=start_request.api_key
         )
         
         # Store job info
         job_info = JobInfo(
             id=job_id,
-            description=request.description,
+            description=start_request.description,
             created_at=datetime.now(),
-            config=request.config,
+            config=start_request.config,
             status="running",
-            otlp_endpoint=request.otlp_endpoint
+            otlp_endpoint=start_request.otlp_endpoint,
+            user=user
         )
         
         active_jobs[job_id] = job_info
@@ -138,8 +154,9 @@ async def start_generation(request: StartRequest):
         return {
             "status": "started",
             "job_id": job_id,
-            "description": request.description,
-            "created_at": job_info.created_at.isoformat()
+            "description": start_request.description,
+            "created_at": job_info.created_at.isoformat(),
+            "user": user
         }
         
     except Exception as e:
@@ -190,7 +207,8 @@ async def list_jobs():
             created_at=job.created_at,
             config=job.config,
             status=job.status,
-            otlp_endpoint=job.otlp_endpoint
+            otlp_endpoint=job.otlp_endpoint,
+            user=job.user
         )
         for job in active_jobs.values()
     ]
@@ -218,7 +236,8 @@ async def get_job(job_id: str):
         created_at=job.created_at,
         config=job.config,
         status=job.status,
-        otlp_endpoint=job.otlp_endpoint
+        otlp_endpoint=job.otlp_endpoint,
+        user=job.user
     )
 
 @app.delete("/jobs/{job_id}")
@@ -239,6 +258,66 @@ async def delete_job(job_id: str):
     del active_jobs[job_id]
     
     return {"status": "deleted", "job_id": job_id}
+
+@app.post("/restart/{job_id}")
+async def restart_job(job_id: str, restart_request: Optional[RestartRequest] = None, request: Request = None):
+    """
+    Restarts a job. Can optionally update configuration, description, or OTLP endpoint.
+    Stops it first if running, then starts it again.
+    """
+    if job_id not in active_jobs:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    
+    job_info = active_jobs[job_id]
+    
+    try:
+        # Stop the job if it's running
+        if job_id in active_generators:
+            generator = active_generators[job_id]
+            generator.stop()
+            del active_generators[job_id]
+        
+        # Get user from request headers (may be different from original)
+        user = get_user_from_request(request)
+        
+        # Use new config if provided, otherwise use original
+        config_to_use = restart_request.config if restart_request and restart_request.config else job_info.config
+        otlp_endpoint_to_use = restart_request.otlp_endpoint if restart_request and restart_request.otlp_endpoint else job_info.otlp_endpoint
+        api_key_to_use = restart_request.api_key if restart_request and restart_request.api_key else None
+        description_to_use = restart_request.description if restart_request and restart_request.description else job_info.description
+        
+        # Create new generator with the config
+        scenario_config = ScenarioConfig(**config_to_use)
+        generator = TelemetryGenerator(
+            config=scenario_config,
+            otlp_endpoint=otlp_endpoint_to_use,
+            api_key=api_key_to_use
+        )
+        
+        # Update job info with new values
+        job_info.config = config_to_use
+        job_info.otlp_endpoint = otlp_endpoint_to_use
+        job_info.description = description_to_use
+        job_info.status = "running"
+        job_info.user = user  # Update user in case it changed
+        active_generators[job_id] = generator
+        
+        # Start the generator
+        generator.start()
+        
+        return {
+            "status": "restarted",
+            "job_id": job_id,
+            "description": job_info.description,
+            "user": user
+        }
+        
+    except Exception as e:
+        # If restart fails, mark job as stopped
+        job_info.status = "stopped"
+        if job_id in active_generators:
+            del active_generators[job_id]
+        raise HTTPException(status_code=500, detail=f"Failed to restart job: {e}")
 
 # Legacy endpoints for backward compatibility
 @app.post("/stop")

@@ -1,18 +1,16 @@
 import { useState, useEffect } from 'react'
-import { API_BASE_URL } from '../config'
+import { api } from '../utils/api'
 
 function JobsPage() {
   const [jobs, setJobs] = useState([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
+  const [selectedConfig, setSelectedConfig] = useState(null)
+  const [showConfigModal, setShowConfigModal] = useState(false)
 
   const fetchJobs = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/jobs`)
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
-      }
-      const data = await response.json()
+      const data = await api.get('/jobs')
       setJobs(data.jobs)
     } catch (error) {
       console.error("Failed to fetch jobs:", error)
@@ -24,17 +22,23 @@ function JobsPage() {
 
   const handleStopJob = async (jobId) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/stop/${jobId}`, {
-        method: 'POST',
-      })
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
-      }
-      // Refresh the jobs list
-      fetchJobs()
+      await api.post(`/stop/${jobId}`)
+      // Refresh the jobs list with a slight delay to ensure backend processing
+      setTimeout(fetchJobs, 300)
     } catch (error) {
       console.error("Failed to stop job:", error)
       setError(`Error stopping job: ${error.message}`)
+    }
+  }
+
+  const handleRestartJob = async (jobId) => {
+    try {
+      await api.post(`/restart/${jobId}`)
+      // Refresh the jobs list with a slight delay to ensure backend processing
+      setTimeout(fetchJobs, 300)
+    } catch (error) {
+      console.error("Failed to restart job:", error)
+      setError(`Error restarting job: ${error.message}`)
     }
   }
 
@@ -44,24 +48,29 @@ function JobsPage() {
     }
     
     try {
-      const response = await fetch(`${API_BASE_URL}/jobs/${jobId}`, {
-        method: 'DELETE',
-      })
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
-      }
-      // Refresh the jobs list
-      fetchJobs()
+      await api.delete(`/jobs/${jobId}`)
+      // Refresh the jobs list with a slight delay to ensure backend processing
+      setTimeout(fetchJobs, 300)
     } catch (error) {
       console.error("Failed to delete job:", error)
       setError(`Error deleting job: ${error.message}`)
     }
   }
 
+  const handleViewConfig = (config) => {
+    setSelectedConfig(config)
+    setShowConfigModal(true)
+  }
+
+  const closeConfigModal = () => {
+    setShowConfigModal(false)
+    setSelectedConfig(null)
+  }
+
   useEffect(() => {
     fetchJobs()
-    // Refresh jobs every 5 seconds
-    const interval = setInterval(fetchJobs, 5000)
+    // Refresh jobs every 3 seconds for more responsive updates
+    const interval = setInterval(fetchJobs, 3000)
     return () => clearInterval(interval)
   }, [])
 
@@ -126,14 +135,12 @@ function JobsPage() {
             <div key={job.id} className="bg-gray-800 rounded-lg p-6 border border-gray-700">
               <div className="flex justify-between items-start mb-4">
                 <div className="flex-1">
-                  <div className="flex items-center gap-3 mb-2">
+                  <div className="mb-2">
                     <h3 className="text-lg font-semibold text-white">{job.description}</h3>
-                    <span className={`px-2 py-1 rounded text-xs font-medium text-white ${getStatusColor(job.status)}`}>
-                      {job.status}
-                    </span>
                   </div>
                   <div className="text-sm text-gray-400 space-y-1">
                     <p><span className="font-medium">Job ID:</span> {job.id}</p>
+                    <p><span className="font-medium">User:</span> {job.user || 'Not logged in'}</p>
                     <p><span className="font-medium">Created:</span> {formatDate(job.created_at)}</p>
                     <p><span className="font-medium">Services:</span> {getServiceCount(job.config)}</p>
                     <p><span className="font-medium">Languages:</span> {getServiceLanguages(job.config).join(', ')}</p>
@@ -142,21 +149,46 @@ function JobsPage() {
                     )}
                   </div>
                 </div>
-                <div className="flex gap-2">
-                  {job.status === 'running' && (
-                    <button
-                      onClick={() => handleStopJob(job.id)}
-                      className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm transition-colors"
-                    >
-                      Stop
-                    </button>
-                  )}
-                  <button
-                    onClick={() => handleDeleteJob(job.id)}
-                    className="bg-gray-600 hover:bg-gray-700 text-white px-3 py-1 rounded text-sm transition-colors"
-                  >
-                    Delete
-                  </button>
+                <div className="flex flex-col items-end gap-3">
+                  <span className={`px-3 py-1 rounded-full text-xs font-medium text-white whitespace-nowrap uppercase tracking-wide ${getStatusColor(job.status)}`}>
+                    {job.status}
+                  </span>
+                    <div className="flex gap-2 flex-wrap">
+                      <button
+                        onClick={() => handleViewConfig(job.config)}
+                        className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm transition-colors"
+                      >
+                        View Config
+                      </button>
+                      {job.status === 'running' && (
+                        <button
+                          onClick={() => handleStopJob(job.id)}
+                          className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm transition-colors"
+                        >
+                          Stop
+                        </button>
+                      )}
+                      {job.status === 'stopped' && (
+                        <button
+                          onClick={() => handleRestartJob(job.id)}
+                          className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm transition-colors"
+                        >
+                          Start
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleRestartJob(job.id)}
+                        className="bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1 rounded text-sm transition-colors"
+                      >
+                        Restart
+                      </button>
+                      <button
+                        onClick={() => handleDeleteJob(job.id)}
+                        className="bg-gray-600 hover:bg-gray-700 text-white px-3 py-1 rounded text-sm transition-colors"
+                      >
+                        Delete
+                      </button>
+                    </div>
                 </div>
               </div>
               
@@ -230,6 +262,36 @@ function JobsPage() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Config View Modal */}
+      {showConfigModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-6 max-w-4xl w-full max-h-[80vh] overflow-hidden">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold text-white">Job Configuration (JSON)</h3>
+              <button
+                onClick={closeConfigModal}
+                className="text-gray-400 hover:text-white text-xl"
+              >
+                ×
+              </button>
+            </div>
+            <div className="bg-gray-900 rounded p-4 overflow-auto max-h-[60vh]">
+              <pre className="text-sm text-gray-300 whitespace-pre-wrap">
+                {JSON.stringify(selectedConfig, null, 2)}
+              </pre>
+            </div>
+            <div className="flex justify-end mt-4">
+              <button
+                onClick={closeConfigModal}
+                className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

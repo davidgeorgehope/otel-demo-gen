@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import yaml from 'js-yaml'
 import Header from './components/Header'
 import ScenarioForm from './components/ScenarioForm'
@@ -6,7 +6,7 @@ import ConfigDisplay from './components/ConfigDisplay'
 import Controls from './components/Controls'
 import StatusBar from './components/StatusBar'
 import JobsPage from './components/JobsPage'
-import { API_BASE_URL } from './config'
+import { api } from './utils/api'
 
 function App() {
   const [scenario, setScenario] = useState('')
@@ -19,23 +19,34 @@ function App() {
   const [activeTab, setActiveTab] = useState('create') // 'create' or 'jobs'
   const [currentJobId, setCurrentJobId] = useState(null)
 
+  // Sync state with backend status
+  const checkStatus = async () => {
+    try {
+      const statusData = await api.get('/status')
+      setIsDemoRunning(statusData.running)
+      setCurrentJobId(statusData.job_id)
+    } catch (error) {
+      // Silently handle error - status endpoint might not be available
+      console.debug('Status check failed:', error.message)
+    }
+  }
+
+  useEffect(() => {
+    // Check status on mount
+    checkStatus()
+    
+    // Check status every 5 seconds to stay in sync
+    const interval = setInterval(checkStatus, 5000)
+    
+    return () => clearInterval(interval)
+  }, [])
+
   const handleGenerateConfig = async () => {
     setIsLoading(true)
     setYamlConfig('')
     setError('')
     try {
-      const response = await fetch(`${API_BASE_URL}/generate-config`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ description: scenario }),
-      })
-      if (!response.ok) {
-        const errorText = await response.text()
-        throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`)
-      }
-      const data = await response.json()
+      const data = await api.post('/generate-config', { description: scenario })
       setYamlConfig(data.yaml)
     } catch (error) {
       console.error("Failed to generate config:", error)
@@ -48,25 +59,31 @@ function App() {
   const handleStartDemo = async () => {
     setError('')
     try {
-      const response = await fetch(`${API_BASE_URL}/start`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+      // If there's already a job (running or stopped), restart it instead of creating a new one
+      if (currentJobId) {
+        const data = await api.post(`/restart/${currentJobId}`, {
+          config: yamlConfig ? JSON.parse(JSON.stringify(yaml.load(yamlConfig))) : null,
+          description: scenario || 'Telemetry Generation Job',
+          otlp_endpoint: otlpEndpoint,
+          api_key: apiKey,
+        })
+        // Job ID stays the same when restarting
+        setIsDemoRunning(true)
+        // Force a status check to ensure UI is in sync
+        setTimeout(checkStatus, 500)
+      } else {
+        // Create a new job
+        const data = await api.post('/start', {
           config: yamlConfig ? JSON.parse(JSON.stringify(yaml.load(yamlConfig))) : {},
           description: scenario || 'Telemetry Generation Job',
           otlp_endpoint: otlpEndpoint,
           api_key: apiKey,
-        }),
-      })
-      if (!response.ok) {
-        const errorText = await response.text()
-        throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`)
+        })
+        setIsDemoRunning(true)
+        setCurrentJobId(data.job_id)
+        // Force a status check to ensure UI is in sync
+        setTimeout(checkStatus, 500)
       }
-      const data = await response.json()
-      setIsDemoRunning(true)
-      setCurrentJobId(data.job_id)
     } catch (error) {
       console.error("Failed to start demo:", error)
       setError(`Error starting demo: ${error.message}`)
@@ -76,15 +93,11 @@ function App() {
   const handleStopDemo = async () => {
     setError('')
     try {
-      const response = await fetch(`${API_BASE_URL}/stop`, {
-        method: 'POST',
-      })
-      if (!response.ok) {
-        const errorText = await response.text()
-        throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`)
-      }
+      await api.post('/stop')
       setIsDemoRunning(false)
       setCurrentJobId(null)
+      // Force a status check to ensure UI is in sync
+      setTimeout(checkStatus, 500)
     } catch (error) {
       console.error("Failed to stop demo:", error)
       setError(`Error stopping demo: ${error.message}`)
@@ -134,7 +147,11 @@ function App() {
         {/* Navigation Tabs */}
         <div className="flex space-x-1 bg-gray-800 p-1 rounded-lg mb-8">
           <button
-            onClick={() => setActiveTab('create')}
+            onClick={() => {
+              setActiveTab('create')
+              // Refresh status when switching back to create tab
+              setTimeout(checkStatus, 100)
+            }}
             className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
               activeTab === 'create'
                 ? 'bg-blue-600 text-white'

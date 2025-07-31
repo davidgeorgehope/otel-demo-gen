@@ -61,7 +61,7 @@ const Controls = ({
           disabled={isDemoRunning || !otlpEndpoint.trim()}
           className="px-6 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors duration-200 font-semibold"
         >
-          Start Demo
+          {currentJobId ? 'Restart Demo' : 'Start Demo'}
         </button>
         <button
           onClick={handleStopDemo}
