@@ -37,6 +37,13 @@ BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
 
 # Optional: Custom OTLP endpoint
 OTEL_COLLECTOR_URL=http://localhost:4318
+
+# Job Management Limits (optional - defaults shown)
+MAX_ACTIVE_JOBS=10                    # Maximum total active jobs
+MAX_JOBS_PER_USER=3                   # Maximum jobs per user
+MAX_JOB_DURATION_HOURS=2              # Auto-stop jobs after this duration
+JOB_CLEANUP_HOURS=24                  # Remove stopped jobs after this time
+CLEANUP_INTERVAL_MINUTES=15           # How often to run cleanup
 ```
 
 ## Docker Compose Deployment (Recommended for Testing)

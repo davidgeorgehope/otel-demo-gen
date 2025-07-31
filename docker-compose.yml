@@ -17,6 +17,12 @@ services:
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-anthropic.claude-3-5-sonnet-20241022-v2:0}
       - OTEL_COLLECTOR_URL=${OTEL_COLLECTOR_URL:-http://otel-collector:4318}
+      # Job Management Limits (defaults shown)
+      - MAX_ACTIVE_JOBS=${MAX_ACTIVE_JOBS:-10}
+      - MAX_JOBS_PER_USER=${MAX_JOBS_PER_USER:-3}  
+      - MAX_JOB_DURATION_HOURS=${MAX_JOB_DURATION_HOURS:-2}
+      - JOB_CLEANUP_HOURS=${JOB_CLEANUP_HOURS:-24}
+      - CLEANUP_INTERVAL_MINUTES=${CLEANUP_INTERVAL_MINUTES:-15}
     networks:
       - otel-demo
     healthcheck:

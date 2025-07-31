@@ -1,11 +1,14 @@
 import yaml
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Response, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, List
 from pydantic import BaseModel
 import os
+import asyncio
+import threading
+import time
 
 from config_schema import GenerateConfigRequest, StartDemoRequest, ScenarioConfig
 from generator import TelemetryGenerator
@@ -27,6 +30,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Job Management Configuration - Environment configurable with sensible defaults
+MAX_ACTIVE_JOBS = int(os.getenv("MAX_ACTIVE_JOBS", "50"))  # Maximum total active jobs
+MAX_JOBS_PER_USER = int(os.getenv("MAX_JOBS_PER_USER", "3"))  # Maximum jobs per user
+MAX_JOB_DURATION_HOURS = int(os.getenv("MAX_JOB_DURATION_HOURS", "24"))  # Maximum job runtime
+JOB_CLEANUP_HOURS = int(os.getenv("JOB_CLEANUP_HOURS", "24"))  # How long to keep stopped jobs
+CLEANUP_INTERVAL_MINUTES = int(os.getenv("CLEANUP_INTERVAL_MINUTES", "15"))  # Cleanup frequency
+
 # Job management system - replace global singleton with multi-job support
 class JobInfo(BaseModel):
     id: str
@@ -36,14 +46,101 @@ class JobInfo(BaseModel):
     status: str = "running"
     otlp_endpoint: Optional[str] = None
     user: Optional[str] = "Not logged in"
+    timeout_at: Optional[datetime] = None  # When the job should be automatically stopped
 
 # Global job storage and active generators
 active_jobs: Dict[str, JobInfo] = {}
 active_generators: Dict[str, TelemetryGenerator] = {}
 
+# Cleanup tracking
+cleanup_thread: Optional[threading.Thread] = None
+cleanup_stop_event = threading.Event()
+
 def get_user_from_request(request: Request) -> str:
     """Extract user from X-Forwarded-User header, defaulting to 'Not logged in'."""
     return request.headers.get("X-Forwarded-User", "Not logged in")
+
+def count_user_jobs(user: str, status_filter: Optional[str] = None) -> int:
+    """Count jobs for a specific user, optionally filtered by status."""
+    count = 0
+    for job in active_jobs.values():
+        if job.user == user:
+            if status_filter is None or job.status == status_filter:
+                count += 1
+    return count
+
+def count_active_jobs() -> int:
+    """Count currently active (running) jobs."""
+    return len([job for job in active_jobs.values() if job.status == "running"])
+
+def cleanup_old_jobs():
+    """Remove old stopped jobs and timeout long-running jobs."""
+    current_time = datetime.now()
+    cutoff_time = current_time - timedelta(hours=JOB_CLEANUP_HOURS)
+    
+    jobs_to_remove = []
+    jobs_to_timeout = []
+    
+    for job_id, job in active_jobs.items():
+        # Remove old stopped jobs
+        if job.status == "stopped" and job.created_at < cutoff_time:
+            jobs_to_remove.append(job_id)
+        
+        # Timeout long-running jobs
+        elif (job.status == "running" and 
+              job.timeout_at and 
+              current_time > job.timeout_at):
+            jobs_to_timeout.append(job_id)
+    
+    # Remove old stopped jobs
+    for job_id in jobs_to_remove:
+        print(f"Cleaning up old stopped job: {job_id}")
+        del active_jobs[job_id]
+    
+    # Timeout long-running jobs
+    for job_id in jobs_to_timeout:
+        print(f"Timing out long-running job: {job_id}")
+        try:
+            if job_id in active_generators:
+                generator = active_generators[job_id]
+                generator.stop()
+                del active_generators[job_id]
+            
+            active_jobs[job_id].status = "stopped"
+            print(f"Job {job_id} stopped due to timeout")
+        except Exception as e:
+            print(f"Error stopping timed-out job {job_id}: {e}")
+
+def cleanup_worker():
+    """Background worker for periodic cleanup of jobs."""
+    while not cleanup_stop_event.is_set():
+        try:
+            cleanup_old_jobs()
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+        
+        # Wait for the cleanup interval or until stop event is set
+        cleanup_stop_event.wait(timeout=CLEANUP_INTERVAL_MINUTES * 60)
+
+def start_cleanup_worker():
+    """Start the background cleanup worker if not already running."""
+    global cleanup_thread
+    if cleanup_thread is None or not cleanup_thread.is_alive():
+        cleanup_stop_event.clear()
+        cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
+        cleanup_thread.start()
+        print(f"Started cleanup worker (interval: {CLEANUP_INTERVAL_MINUTES} minutes)")
+
+def stop_cleanup_worker():
+    """Stop the background cleanup worker."""
+    global cleanup_thread
+    if cleanup_thread and cleanup_thread.is_alive():
+        cleanup_stop_event.set()
+        cleanup_thread.join(timeout=5)
+        print("Stopped cleanup worker")
+
+# Start cleanup worker on application startup
+start_cleanup_worker()
 
 # --- Models ---
 class GenerateRequest(BaseModel):
@@ -118,11 +215,26 @@ async def start_generation(start_request: StartRequest, request: Request):
     Starts a new telemetry generator job with a given configuration.
     """
     try:
-        # Generate unique job ID
-        job_id = str(uuid.uuid4())[:8]
-        
         # Get user from request headers
         user = get_user_from_request(request)
+        
+        # Check system-wide active job limit
+        if count_active_jobs() >= MAX_ACTIVE_JOBS:
+            raise HTTPException(
+                status_code=429, 
+                detail=f"Maximum active jobs limit reached ({MAX_ACTIVE_JOBS}). Please wait for some jobs to complete or stop existing jobs."
+            )
+        
+        # Check per-user active job limit
+        user_active_jobs = count_user_jobs(user, "running")
+        if user_active_jobs >= MAX_JOBS_PER_USER:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Maximum jobs per user limit reached ({MAX_JOBS_PER_USER}). Please stop some of your existing jobs first."
+            )
+        
+        # Generate unique job ID
+        job_id = str(uuid.uuid4())[:8]
         
         # Validate configuration
         scenario_config = ScenarioConfig(**start_request.config)
@@ -134,6 +246,9 @@ async def start_generation(start_request: StartRequest, request: Request):
             api_key=start_request.api_key
         )
         
+        # Calculate timeout time
+        timeout_at = datetime.now() + timedelta(hours=MAX_JOB_DURATION_HOURS)
+        
         # Store job info
         job_info = JobInfo(
             id=job_id,
@@ -142,7 +257,8 @@ async def start_generation(start_request: StartRequest, request: Request):
             config=start_request.config,
             status="running",
             otlp_endpoint=start_request.otlp_endpoint,
-            user=user
+            user=user,
+            timeout_at=timeout_at
         )
         
         active_jobs[job_id] = job_info
@@ -156,9 +272,19 @@ async def start_generation(start_request: StartRequest, request: Request):
             "job_id": job_id,
             "description": start_request.description,
             "created_at": job_info.created_at.isoformat(),
-            "user": user
+            "user": user,
+            "timeout_at": timeout_at.isoformat(),
+            "limits": {
+                "max_duration_hours": MAX_JOB_DURATION_HOURS,
+                "user_active_jobs": user_active_jobs + 1,
+                "max_jobs_per_user": MAX_JOBS_PER_USER,
+                "system_active_jobs": count_active_jobs() + 1,
+                "max_active_jobs": MAX_ACTIVE_JOBS
+            }
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start generator: {e}")
 
@@ -485,6 +611,69 @@ async def get_llm_config():
         config_status["details"]["error"] = f"Unsupported provider: {provider}"
     
     return config_status
+
+@app.get("/limits", summary="Get current job limits and usage")
+async def get_limits():
+    """
+    Returns current job limits configuration and usage statistics.
+    """
+    active_count = count_active_jobs()
+    total_count = len(active_jobs)
+    stopped_count = total_count - active_count
+    
+    # Get per-user breakdown
+    user_stats = {}
+    for job in active_jobs.values():
+        user = job.user
+        if user not in user_stats:
+            user_stats[user] = {"active": 0, "stopped": 0, "total": 0}
+        
+        user_stats[user]["total"] += 1
+        if job.status == "running":
+            user_stats[user]["active"] += 1
+        else:
+            user_stats[user]["stopped"] += 1
+    
+    return {
+        "limits": {
+            "max_active_jobs": MAX_ACTIVE_JOBS,
+            "max_jobs_per_user": MAX_JOBS_PER_USER,
+            "max_job_duration_hours": MAX_JOB_DURATION_HOURS,
+            "job_cleanup_hours": JOB_CLEANUP_HOURS,
+            "cleanup_interval_minutes": CLEANUP_INTERVAL_MINUTES
+        },
+        "current_usage": {
+            "active_jobs": active_count,
+            "stopped_jobs": stopped_count,
+            "total_jobs": total_count,
+            "remaining_slots": max(0, MAX_ACTIVE_JOBS - active_count)
+        },
+        "user_breakdown": user_stats,
+        "cleanup_status": {
+            "worker_running": cleanup_thread and cleanup_thread.is_alive(),
+            "next_cleanup_in_minutes": CLEANUP_INTERVAL_MINUTES  # Approximate
+        }
+    }
+
+@app.post("/cleanup", summary="Manually trigger job cleanup")
+async def manual_cleanup():
+    """
+    Manually trigger cleanup of old jobs and timeout long-running jobs.
+    """
+    try:
+        jobs_before = len(active_jobs)
+        cleanup_old_jobs()
+        jobs_after = len(active_jobs)
+        cleaned_count = jobs_before - jobs_after
+        
+        return {
+            "status": "completed",
+            "jobs_cleaned": cleaned_count,
+            "jobs_remaining": jobs_after,
+            "message": f"Cleaned up {cleaned_count} old jobs"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {e}")
 
 @app.get("/", summary="Root endpoint for health check")
 async def read_root():
