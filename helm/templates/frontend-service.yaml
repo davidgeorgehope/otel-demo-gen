@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-demo-frontend
+
+  labels:
+    app: otel-demo-frontend
+    component: frontend
+spec:
+  selector:
+    app: otel-demo-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP
+  type: {{ .Values.service.type }}

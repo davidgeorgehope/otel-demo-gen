@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-demo-frontend
+
+  labels:
+    app: otel-demo-frontend
+    component: frontend
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      app: otel-demo-frontend
+  template:
+    metadata:
+      labels:
+        app: otel-demo-frontend
+        component: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
+        ports:
+        - containerPort: 80
+          name: http
+        resources:
+          requests:
+            memory: "{{ .Values.frontend.resources.requests.memory }}"
+            cpu: "{{ .Values.frontend.resources.requests.cpu }}"
+          limits:
+            memory: "{{ .Values.frontend.resources.limits.memory }}"
+            cpu: "{{ .Values.frontend.resources.limits.cpu }}"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
