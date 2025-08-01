@@ -1,8 +1,20 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 
 const Header = () => {
-  // Get current user from localStorage or window for display
-  const currentUser = window.forwardedUser || localStorage.getItem('test-forwarded-user') || 'Not logged in';
+  const [currentUser, setCurrentUser] = useState('Loading...');
+  
+  useEffect(() => {
+    // Fetch current user from API
+    fetch('/api/whoami')
+      .then(response => response.json())
+      .then(data => {
+        setCurrentUser(data.user || 'Not logged in');
+      })
+      .catch(error => {
+        console.error('Error fetching current user:', error);
+        setCurrentUser('Not logged in');
+      });
+  }, []);
   
   return (
     <header className="mb-8">

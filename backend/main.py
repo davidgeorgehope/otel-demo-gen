@@ -675,6 +675,14 @@ async def manual_cleanup():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cleanup failed: {e}")
 
+@app.get("/whoami", summary="Get current user information")
+async def whoami(request: Request):
+    """
+    Returns the current user as determined from the X-Forwarded-User header.
+    """
+    user = get_user_from_request(request)
+    return {"user": user}
+
 @app.get("/", summary="Root endpoint for health check")
 async def read_root():
     return {"message": "Welcome to the Telemetry Demo Generator API"} 
