@@ -83,7 +83,9 @@ function JobsPage() {
       case 'running':
         return 'bg-green-500'
       case 'stopped':
-        return 'bg-red-500'
+        return 'bg-gray-500'
+      case 'failed':
+        return 'bg-red-600'
       default:
         return 'bg-gray-500'
     }
@@ -147,6 +149,17 @@ function JobsPage() {
                     {job.otlp_endpoint && (
                       <p><span className="font-medium">OTLP Endpoint:</span> {job.otlp_endpoint}</p>
                     )}
+                    {job.status === 'failed' && job.error_message && (
+                      <div className="mt-2 p-2 bg-red-900/30 border border-red-700/50 rounded">
+                        <p className="font-medium text-red-300 text-xs mb-1">Connection Error:</p>
+                        <p className="text-xs text-red-200">{job.error_message}</p>
+                        {job.failure_count > 0 && (
+                          <p className="text-xs text-red-400 mt-1">
+                            Consecutive failures: {job.failure_count}
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="flex flex-col items-end gap-3">
@@ -168,12 +181,12 @@ function JobsPage() {
                           Stop
                         </button>
                       )}
-                      {job.status === 'stopped' && (
+                      {(job.status === 'stopped' || job.status === 'failed') && (
                         <button
                           onClick={() => handleRestartJob(job.id)}
                           className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm transition-colors"
                         >
-                          Start
+                          {job.status === 'failed' ? 'Restart' : 'Start'}
                         </button>
                       )}
                       <button

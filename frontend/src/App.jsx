@@ -18,6 +18,8 @@ function App() {
   const [error, setError] = useState('')
   const [activeTab, setActiveTab] = useState('create') // 'create' or 'jobs'
   const [currentJobId, setCurrentJobId] = useState(null)
+  const [currentJobStatus, setCurrentJobStatus] = useState(null)
+  const [currentJobError, setCurrentJobError] = useState(null)
 
   // Sync state with backend status
   const checkStatus = async () => {
@@ -25,6 +27,20 @@ function App() {
       const statusData = await api.get('/status')
       setIsDemoRunning(statusData.running)
       setCurrentJobId(statusData.job_id)
+      
+      // If we have a job ID, get detailed job info for error handling
+      if (statusData.job_id) {
+        try {
+          const jobData = await api.get(`/jobs/${statusData.job_id}`)
+          setCurrentJobStatus(jobData.status)
+          setCurrentJobError(jobData.error_message)
+        } catch (jobError) {
+          console.debug('Job status check failed:', jobError.message)
+        }
+      } else {
+        setCurrentJobStatus(null)
+        setCurrentJobError(null)
+      }
     } catch (error) {
       // Silently handle error - status endpoint might not be available
       console.debug('Status check failed:', error.message)
@@ -174,7 +190,13 @@ function App() {
 
         {renderTabContent()}
 
-        <StatusBar error={error} isDemoRunning={isDemoRunning} currentJobId={currentJobId} />
+        <StatusBar 
+          error={error} 
+          isDemoRunning={isDemoRunning} 
+          currentJobId={currentJobId}
+          jobStatus={currentJobStatus}
+          jobError={currentJobError}
+        />
       </div>
     </div>
   )

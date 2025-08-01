@@ -9,6 +9,8 @@ import os
 import asyncio
 import threading
 import time
+import httpx
+import json
 
 from config_schema import GenerateConfigRequest, StartDemoRequest, ScenarioConfig
 from generator import TelemetryGenerator
@@ -43,10 +45,12 @@ class JobInfo(BaseModel):
     description: str
     created_at: datetime
     config: dict
-    status: str = "running"
+    status: str = "running"  # "running", "stopped", "failed"
     otlp_endpoint: Optional[str] = None
     user: Optional[str] = "Not logged in"
     timeout_at: Optional[datetime] = None  # When the job should be automatically stopped
+    error_message: Optional[str] = None  # Error details if job failed
+    failure_count: int = 0  # Number of consecutive OTLP failures
 
 # Global job storage and active generators
 active_jobs: Dict[str, JobInfo] = {}
@@ -55,6 +59,18 @@ active_generators: Dict[str, TelemetryGenerator] = {}
 # Cleanup tracking
 cleanup_thread: Optional[threading.Thread] = None
 cleanup_stop_event = threading.Event()
+
+def handle_generator_failure(job_id: str, error_message: str):
+    """Callback function to handle generator failures and update job status."""
+    if job_id in active_jobs:
+        print(f"🚨 Job {job_id} failed: {error_message}")
+        active_jobs[job_id].status = "failed"
+        active_jobs[job_id].error_message = error_message
+        active_jobs[job_id].failure_count += 1
+        
+        # Remove from active generators since it's failed
+        if job_id in active_generators:
+            del active_generators[job_id]
 
 def get_user_from_request(request: Request) -> str:
     """Extract user from X-Forwarded-User header, defaulting to 'Not logged in'."""
@@ -160,6 +176,8 @@ class JobResponse(BaseModel):
     status: str
     otlp_endpoint: Optional[str] = None
     user: Optional[str] = "Not logged in"
+    error_message: Optional[str] = None
+    failure_count: int = 0
 
 class JobListResponse(BaseModel):
     jobs: List[JobResponse]
@@ -175,6 +193,12 @@ class RestartRequest(BaseModel):
     description: Optional[str] = None
     otlp_endpoint: Optional[str] = None
     api_key: Optional[str] = None
+
+class HealthCheckResponse(BaseModel):
+    endpoint: str
+    status: str  # "healthy", "unhealthy"
+    response_time_ms: Optional[int] = None
+    error: Optional[str] = None
 
 @app.post("/generate-config", response_model=dict)
 async def generate_config(request: GenerateRequest):
@@ -239,11 +263,15 @@ async def start_generation(start_request: StartRequest, request: Request):
         # Validate configuration
         scenario_config = ScenarioConfig(**start_request.config)
         
-        # Create and start generator
+        # Create and start generator with failure callback
+        def failure_callback(error_msg: str):
+            handle_generator_failure(job_id, error_msg)
+        
         generator = TelemetryGenerator(
             config=scenario_config,
             otlp_endpoint=start_request.otlp_endpoint,
-            api_key=start_request.api_key
+            api_key=start_request.api_key,
+            failure_callback=failure_callback
         )
         
         # Calculate timeout time
@@ -334,7 +362,9 @@ async def list_jobs():
             config=job.config,
             status=job.status,
             otlp_endpoint=job.otlp_endpoint,
-            user=job.user
+            user=job.user,
+            error_message=job.error_message,
+            failure_count=job.failure_count
         )
         for job in active_jobs.values()
     ]
@@ -363,7 +393,9 @@ async def get_job(job_id: str):
         config=job.config,
         status=job.status,
         otlp_endpoint=job.otlp_endpoint,
-        user=job.user
+        user=job.user,
+        error_message=job.error_message,
+        failure_count=job.failure_count
     )
 
 @app.delete("/jobs/{job_id}")
@@ -412,20 +444,26 @@ async def restart_job(job_id: str, restart_request: Optional[RestartRequest] = N
         api_key_to_use = restart_request.api_key if restart_request and restart_request.api_key else None
         description_to_use = restart_request.description if restart_request and restart_request.description else job_info.description
         
-        # Create new generator with the config
+        # Create new generator with the config and failure callback
+        def failure_callback(error_msg: str):
+            handle_generator_failure(job_id, error_msg)
+        
         scenario_config = ScenarioConfig(**config_to_use)
         generator = TelemetryGenerator(
             config=scenario_config,
             otlp_endpoint=otlp_endpoint_to_use,
-            api_key=api_key_to_use
+            api_key=api_key_to_use,
+            failure_callback=failure_callback
         )
         
-        # Update job info with new values
+        # Update job info with new values - reset error state on restart
         job_info.config = config_to_use
         job_info.otlp_endpoint = otlp_endpoint_to_use
         job_info.description = description_to_use
         job_info.status = "running"
         job_info.user = user  # Update user in case it changed
+        job_info.error_message = None  # Clear previous error
+        job_info.failure_count = 0  # Reset failure count
         active_generators[job_id] = generator
         
         # Start the generator
@@ -685,4 +723,100 @@ async def whoami(request: Request):
 
 @app.get("/", summary="Root endpoint for health check")
 async def read_root():
-    return {"message": "Welcome to the Telemetry Demo Generator API"} 
+    return {"message": "Welcome to the Telemetry Demo Generator API"}
+
+@app.post("/health-check-otlp", response_model=HealthCheckResponse)
+async def health_check_otlp(request: dict = Body(...)):
+    """
+    Check if an OTLP endpoint is reachable and accepting requests.
+    Expects a JSON body with 'otlp_endpoint' field.
+    """
+    otlp_endpoint = request.get("otlp_endpoint")
+    if not otlp_endpoint:
+        raise HTTPException(status_code=400, detail="otlp_endpoint is required")
+    
+    # Ensure endpoint has proper format
+    collector_url = otlp_endpoint.rstrip('/')
+    if not collector_url.endswith('/'):
+        collector_url += '/'
+    
+    test_url = f"{collector_url}v1/traces"
+    
+    start_time = datetime.now()
+    
+    try:
+        # Create a minimal test payload
+        test_payload = {
+            "resourceSpans": [{
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": "health-check"}}
+                    ]
+                },
+                "scopeSpans": [{
+                    "scope": {"name": "health-check"},
+                    "spans": [{
+                        "traceId": "00000000000000000000000000000001",
+                        "spanId": "0000000000000001",
+                        "name": "health-check-span",
+                        "kind": 1,
+                        "startTimeUnixNano": str(int(start_time.timestamp() * 1_000_000_000)),
+                        "endTimeUnixNano": str(int(start_time.timestamp() * 1_000_000_000) + 1_000_000),
+                        "status": {"code": 1}
+                    }]
+                }]
+            }]
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                test_url,
+                headers={"Content-Type": "application/json"},
+                data=json.dumps(test_payload),
+                timeout=5.0
+            )
+            
+            end_time = datetime.now()
+            response_time = int((end_time - start_time).total_seconds() * 1000)
+            
+            if response.status_code in [200, 202]:
+                return HealthCheckResponse(
+                    endpoint=otlp_endpoint,
+                    status="healthy",
+                    response_time_ms=response_time
+                )
+            else:
+                return HealthCheckResponse(
+                    endpoint=otlp_endpoint,
+                    status="unhealthy",
+                    response_time_ms=response_time,
+                    error=f"HTTP {response.status_code}: {response.reason_phrase}"
+                )
+                
+    except httpx.TimeoutException:
+        end_time = datetime.now()
+        response_time = int((end_time - start_time).total_seconds() * 1000)
+        return HealthCheckResponse(
+            endpoint=otlp_endpoint,
+            status="unhealthy",
+            response_time_ms=response_time,
+            error="Connection timeout"
+        )
+    except httpx.RequestError as e:
+        end_time = datetime.now()
+        response_time = int((end_time - start_time).total_seconds() * 1000)
+        return HealthCheckResponse(
+            endpoint=otlp_endpoint,
+            status="unhealthy",
+            response_time_ms=response_time,
+            error=f"Connection error: {str(e)}"
+        )
+    except Exception as e:
+        end_time = datetime.now()
+        response_time = int((end_time - start_time).total_seconds() * 1000)
+        return HealthCheckResponse(
+            endpoint=otlp_endpoint,
+            status="unhealthy",
+            response_time_ms=response_time,
+            error=f"Unexpected error: {str(e)}"
+        ) 

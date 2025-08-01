@@ -49,12 +49,19 @@ class TelemetryGenerator:
         "typescript": {"name": "node.js", "version": "18.12.1"},
     }
 
-    def __init__(self, config: ScenarioConfig, otlp_endpoint: str, api_key: Optional[str] = None):
+    def __init__(self, config: ScenarioConfig, otlp_endpoint: str, api_key: Optional[str] = None, failure_callback=None):
         self.config = config
         self.api_key = api_key
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._k8s_thread: Optional[threading.Thread] = None  # New: K8s metrics thread
+        
+        # Error handling and connection monitoring
+        self.failure_callback = failure_callback  # Callback to report failures to job management
+        self.consecutive_failures = 0
+        self.max_failures = 5  # Fail the job after 5 consecutive OTLP failures
+        self.last_successful_send = None
+        self.is_failed = False  # Track if generator has failed due to connection issues
         
         self.headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -310,6 +317,10 @@ class TelemetryGenerator:
             response.raise_for_status()
             print(f"Successfully sent {signal_name} to {url} - Status: {response.status_code}")
             
+            # Reset failure count on successful send
+            self.consecutive_failures = 0
+            self.last_successful_send = datetime.now()
+            
             # Debug: Log payload structure for metrics
             if signal_name == "k8s-metrics" and payload.get("resourceMetrics"):
                 resource_count = len(payload["resourceMetrics"])
@@ -326,9 +337,29 @@ class TelemetryGenerator:
                     print(f"  📝 Sent {total_logs} k8s logs from {resource_count} resources")
             
         except httpx.RequestError as e:
-            print(f"❌ Error sending {signal_name} to collector: {e}")
+            self._handle_connection_failure(f"Connection error sending {signal_name}: {e}", url)
+        except httpx.HTTPStatusError as e:
+            self._handle_connection_failure(f"HTTP error sending {signal_name}: {e.response.status_code} {e.response.reason_phrase}", url)
         except Exception as e:
-            print(f"❌ An unexpected error occurred while sending {signal_name}: {e}")
+            self._handle_connection_failure(f"Unexpected error sending {signal_name}: {e}", url)
+    
+    def _handle_connection_failure(self, error_message: str, url: str):
+        """Handle OTLP connection failures with escalating response."""
+        self.consecutive_failures += 1
+        print(f"❌ {error_message} (failure {self.consecutive_failures}/{self.max_failures})")
+        
+        # If we've reached the failure threshold, mark the job as failed
+        if self.consecutive_failures >= self.max_failures and not self.is_failed:
+            self.is_failed = True
+            full_error = f"OTLP endpoint unreachable: {self.consecutive_failures} consecutive failures to {url}. Last error: {error_message}"
+            print(f"🚨 Generator marking job as failed: {full_error}")
+            
+            # Notify the job management system via callback
+            if self.failure_callback:
+                self.failure_callback(full_error)
+            
+            # Stop the generator
+            self.stop()
 
     def _generate_id(self, byte_length: int) -> str:
         """Generates a random hex ID."""
