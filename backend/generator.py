@@ -49,9 +49,10 @@ class TelemetryGenerator:
         "typescript": {"name": "node.js", "version": "18.12.1"},
     }
 
-    def __init__(self, config: ScenarioConfig, otlp_endpoint: str, api_key: Optional[str] = None, failure_callback=None):
+    def __init__(self, config: ScenarioConfig, otlp_endpoint: str, api_key: Optional[str] = None, auth_type: str = "ApiKey", failure_callback=None):
         self.config = config
         self.api_key = api_key
+        self.auth_type = auth_type
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._k8s_thread: Optional[threading.Thread] = None  # New: K8s metrics thread
@@ -65,7 +66,7 @@ class TelemetryGenerator:
         
         self.headers = {"Content-Type": "application/json"}
         if self.api_key:
-            self.headers["Authorization"] = f"ApiKey {self.api_key}"
+            self.headers["Authorization"] = f"{self.auth_type} {self.api_key}"
 
         self.client = httpx.Client(headers=self.headers, http2=True)
 

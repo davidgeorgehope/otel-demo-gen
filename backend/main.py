@@ -167,6 +167,7 @@ class StartRequest(BaseModel):
     description: str = "Telemetry Generation Job"
     otlp_endpoint: Optional[str] = None
     api_key: Optional[str] = None
+    auth_type: str = "ApiKey"
 
 class JobResponse(BaseModel):
     id: str
@@ -193,6 +194,7 @@ class RestartRequest(BaseModel):
     description: Optional[str] = None
     otlp_endpoint: Optional[str] = None
     api_key: Optional[str] = None
+    auth_type: Optional[str] = None
 
 class HealthCheckResponse(BaseModel):
     endpoint: str
@@ -271,6 +273,7 @@ async def start_generation(start_request: StartRequest, request: Request):
             config=scenario_config,
             otlp_endpoint=start_request.otlp_endpoint,
             api_key=start_request.api_key,
+            auth_type=start_request.auth_type,
             failure_callback=failure_callback
         )
         
@@ -442,6 +445,7 @@ async def restart_job(job_id: str, restart_request: Optional[RestartRequest] = N
         config_to_use = restart_request.config if restart_request and restart_request.config else job_info.config
         otlp_endpoint_to_use = restart_request.otlp_endpoint if restart_request and restart_request.otlp_endpoint else job_info.otlp_endpoint
         api_key_to_use = restart_request.api_key if restart_request and restart_request.api_key else None
+        auth_type_to_use = restart_request.auth_type if restart_request and restart_request.auth_type else "ApiKey"
         description_to_use = restart_request.description if restart_request and restart_request.description else job_info.description
         
         # Create new generator with the config and failure callback
@@ -453,6 +457,7 @@ async def restart_job(job_id: str, restart_request: Optional[RestartRequest] = N
             config=scenario_config,
             otlp_endpoint=otlp_endpoint_to_use,
             api_key=api_key_to_use,
+            auth_type=auth_type_to_use,
             failure_callback=failure_callback
         )
         

@@ -5,6 +5,8 @@ const Controls = ({
   setOtlpEndpoint,
   apiKey,
   setApiKey,
+  authType,
+  setAuthType,
   isDemoRunning,
   handleStartDemo,
   handleStopDemo,
@@ -27,19 +29,39 @@ const Controls = ({
             disabled={isDemoRunning}
           />
         </div>
-        <div>
-          <label htmlFor="api-key" className="block mb-2 text-sm font-medium text-gray-400">
-            API Key (Optional)
-          </label>
-          <input
-            id="api-key"
-            type="password"
-            placeholder="Enter API Key for Authorization header"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            className="w-full p-2 bg-gray-700 rounded-md border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-200"
-            disabled={isDemoRunning}
-          />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="md:col-span-2">
+            <label htmlFor="api-key" className="block mb-2 text-sm font-medium text-gray-400">
+              API Key (Optional)
+            </label>
+            <input
+              id="api-key"
+              type="password"
+              placeholder="Enter API Key/Token for Authorization header"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              className="w-full p-2 bg-gray-700 rounded-md border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-200"
+              disabled={isDemoRunning}
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              Will be sent as: Authorization: {authType} {apiKey ? '***' : 'your-key-here'}
+            </p>
+          </div>
+          <div>
+            <label htmlFor="auth-type" className="block mb-2 text-sm font-medium text-gray-400">
+              Auth Type
+            </label>
+            <select
+              id="auth-type"
+              value={authType}
+              onChange={(e) => setAuthType(e.target.value)}
+              className="w-full p-2 bg-gray-700 rounded-md border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-200"
+              disabled={isDemoRunning}
+            >
+              <option value="ApiKey">ApiKey</option>
+              <option value="Bearer">Bearer</option>
+            </select>
+          </div>
         </div>
       </div>
       

@@ -9,6 +9,7 @@ class StartDemoRequest(BaseModel):
     yaml_config: str
     otlp_endpoint: str
     api_key: Optional[str] = None
+    auth_type: str = Field(default="ApiKey", description="Authentication type: 'Bearer' or 'ApiKey'")
 
 # --- New Models for Enhanced Realism ---
 

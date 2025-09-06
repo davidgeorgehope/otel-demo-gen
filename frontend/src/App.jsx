@@ -13,6 +13,7 @@ function App() {
   const [yamlConfig, setYamlConfig] = useState('')
   const [otlpEndpoint, setOtlpEndpoint] = useState('http://localhost:4318')
   const [apiKey, setApiKey] = useState('')
+  const [authType, setAuthType] = useState('ApiKey')
   const [isDemoRunning, setIsDemoRunning] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
@@ -82,6 +83,7 @@ function App() {
           description: scenario || 'Telemetry Generation Job',
           otlp_endpoint: otlpEndpoint,
           api_key: apiKey,
+          auth_type: authType,
         })
         // Job ID stays the same when restarting
         setIsDemoRunning(true)
@@ -94,6 +96,7 @@ function App() {
           description: scenario || 'Telemetry Generation Job',
           otlp_endpoint: otlpEndpoint,
           api_key: apiKey,
+          auth_type: authType,
         })
         setIsDemoRunning(true)
         setCurrentJobId(data.job_id)
@@ -141,6 +144,8 @@ function App() {
               setOtlpEndpoint={setOtlpEndpoint}
               apiKey={apiKey}
               setApiKey={setApiKey}
+              authType={authType}
+              setAuthType={setAuthType}
               isDemoRunning={isDemoRunning}
               handleStartDemo={handleStartDemo}
               handleStopDemo={handleStopDemo}

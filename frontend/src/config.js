@@ -1,4 +1,4 @@
-// API configuration
-const API_BASE_URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8000';
+// API configuration: always use /api; dev server and prod nginx will proxy
+const API_BASE_URL = '/api';
 
 export { API_BASE_URL }; 
