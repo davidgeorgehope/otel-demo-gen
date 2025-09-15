@@ -22,6 +22,14 @@ curl http://localhost:8000/
 
 # Check LLM configuration status
 curl http://localhost:8000/llm-config
+
+# Debug mode with detailed logging
+uvicorn main:app --reload --log-level debug --port 8000
+
+# Test OTLP endpoint connectivity
+curl -X POST http://localhost:8000/health-check-otlp \
+  -H "Content-Type: application/json" \
+  -d '{"endpoint": "http://localhost:4318", "api_key": "test"}'
 ```
 
 ### Frontend (React/Vite)
@@ -194,14 +202,17 @@ Both `/start` and `/restart` endpoints accept the `auth_type` parameter. If not 
 ### Core APIs
 - `POST /generate-config`: Generate YAML from natural language description
 - `POST /start`: Start new telemetry generation job
+- `POST /restart/{job_id}`: Restart an existing job
 - `POST /stop/{job_id}`: Stop specific job
-- `GET /jobs`: List all jobs with status
+- `GET /jobs`: List all jobs with status and filtering
+- `GET /jobs/{job_id}`: Get detailed job information
 - `DELETE /jobs/{job_id}`: Delete job
 - `GET /test-config`: Get sample configuration without LLM
 - `GET /llm-config`: Check LLM provider configuration
 - `GET /limits`: View job limits and current usage
+- `GET /status`: Get current global generator status
 
-### Health & Utilities  
+### Health & Utilities
 - `GET /`: Health check endpoint
 - `POST /health-check-otlp`: Test OTLP endpoint connectivity
 - `POST /cleanup`: Manually trigger job cleanup
@@ -228,6 +239,22 @@ Both `/start` and `/restart` endpoints accept the `auth_type` parameter. If not 
 - Frontend: Test component rendering and user interactions
 - Integration: Test full workflow from description to telemetry
 - Manual: Verify telemetry appears in observability backends
+
+### Testing Commands
+```bash
+# Backend API testing
+curl http://localhost:8000/test-config  # Get sample config
+curl http://localhost:8000/jobs         # List jobs
+curl http://localhost:8000/limits       # Check job limits
+
+# Frontend testing
+cd frontend
+npm run lint                            # ESLint checks
+npm run build                           # Production build test
+
+# Integration testing
+./start-local.sh                        # Full system startup
+```
 
 ## Common Development Tasks
 
@@ -282,10 +309,13 @@ docker run -p 8000:8000 -e OPENAI_API_KEY=$OPENAI_API_KEY otel-demo-backend
 ## Important Implementation Notes
 
 ### Job Management
-- System supports multiple concurrent telemetry jobs
-- Each job runs in separate threads (main + k8s metrics)
-- Automatic cleanup of old/timed-out jobs
-- Per-user job limits with configurable thresholds
+- System supports multiple concurrent telemetry jobs (configurable limits)
+- Each job runs in separate threads (main + k8s metrics threads)
+- Automatic cleanup of old/timed-out jobs every 15 minutes
+- Per-user job limits with configurable thresholds (default: 3 jobs per user)
+- Job states: "running", "stopped", "failed"
+- Jobs automatically marked as "failed" on OTLP connection issues
+- Comprehensive job metadata: creation time, user, service counts, configuration summary
 
 ### Telemetry Realism
 - Multi-language runtime simulation with different metrics per language

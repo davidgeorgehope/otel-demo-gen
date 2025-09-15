@@ -76,33 +76,18 @@ function App() {
   const handleStartDemo = async () => {
     setError('')
     try {
-      // If there's already a job (running or stopped), restart it instead of creating a new one
-      if (currentJobId) {
-        const data = await api.post(`/restart/${currentJobId}`, {
-          config: yamlConfig ? JSON.parse(JSON.stringify(yaml.load(yamlConfig))) : null,
-          description: scenario || 'Telemetry Generation Job',
-          otlp_endpoint: otlpEndpoint,
-          api_key: apiKey,
-          auth_type: authType,
-        })
-        // Job ID stays the same when restarting
-        setIsDemoRunning(true)
-        // Force a status check to ensure UI is in sync
-        setTimeout(checkStatus, 500)
-      } else {
-        // Create a new job
-        const data = await api.post('/start', {
-          config: yamlConfig ? JSON.parse(JSON.stringify(yaml.load(yamlConfig))) : {},
-          description: scenario || 'Telemetry Generation Job',
-          otlp_endpoint: otlpEndpoint,
-          api_key: apiKey,
-          auth_type: authType,
-        })
-        setIsDemoRunning(true)
-        setCurrentJobId(data.job_id)
-        // Force a status check to ensure UI is in sync
-        setTimeout(checkStatus, 500)
-      }
+      // Always create a new job - support multiple concurrent jobs
+      const data = await api.post('/start', {
+        config: yamlConfig ? JSON.parse(JSON.stringify(yaml.load(yamlConfig))) : {},
+        description: scenario || 'Telemetry Generation Job',
+        otlp_endpoint: otlpEndpoint,
+        api_key: apiKey,
+        auth_type: authType,
+      })
+      setIsDemoRunning(true)
+      setCurrentJobId(data.job_id)
+      // Force a status check to ensure UI is in sync
+      setTimeout(checkStatus, 500)
     } catch (error) {
       console.error("Failed to start demo:", error)
       setError(`Error starting demo: ${error.message}`)
