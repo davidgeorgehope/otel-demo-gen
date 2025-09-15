@@ -12,9 +12,10 @@ import time
 import httpx
 import json
 
-from config_schema import GenerateConfigRequest, StartDemoRequest, ScenarioConfig
+from config_schema import GenerateConfigRequest, StartDemoRequest, ScenarioConfig, ScenarioGenerationRequest, ScenarioApplyRequest, ActiveScenario, ScenarioModification
 from generator import TelemetryGenerator
 from llm_config_gen import generate_config_from_description
+from scenario_llm_gen import generate_scenario_from_description, get_predefined_templates
 
 app = FastAPI(
     title="AI-Powered Observability Demo Generator",
@@ -55,6 +56,9 @@ class JobInfo(BaseModel):
 # Global job storage and active generators
 active_jobs: Dict[str, JobInfo] = {}
 active_generators: Dict[str, TelemetryGenerator] = {}
+
+# Global scenario storage
+active_scenarios: Dict[str, ActiveScenario] = {}  # scenario_id -> ActiveScenario
 
 # Cleanup tracking
 cleanup_thread: Optional[threading.Thread] = None
@@ -824,4 +828,187 @@ async def health_check_otlp(request: dict = Body(...)):
             status="unhealthy",
             response_time_ms=response_time,
             error=f"Unexpected error: {str(e)}"
-        ) 
+        )
+
+# --- Scenario Management Endpoints ---
+
+@app.post("/scenarios/generate", summary="Generate scenario from description")
+async def generate_scenario(request: ScenarioGenerationRequest):
+    """
+    Uses LLM to generate a scenario modification from natural language description.
+    """
+    try:
+        scenario_modification = generate_scenario_from_description(
+            request.description,
+            request.context
+        )
+
+        return {
+            "scenario": scenario_modification.dict(),
+            "description": request.description,
+            "generated_at": datetime.now().isoformat()
+        }
+
+    except ValueError as e:
+        # Handle missing API keys or configuration errors
+        error_message = str(e)
+        if "OpenAI API key not found" in error_message:
+            raise HTTPException(
+                status_code=400,
+                detail="OpenAI API key not configured. Please set the OPENAI_API_KEY environment variable."
+            )
+        elif "AWS credentials not found" in error_message:
+            raise HTTPException(
+                status_code=400,
+                detail="AWS credentials not configured. Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables."
+            )
+        else:
+            raise HTTPException(status_code=400, detail=f"Configuration error: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate scenario: {e}")
+
+@app.post("/scenarios/apply/{job_id}", summary="Apply scenario to running job")
+async def apply_scenario(job_id: str, request: ScenarioApplyRequest):
+    """
+    Applies a scenario modification to a running job.
+    """
+    # Check if job exists and is running
+    if job_id not in active_jobs:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    if job_id not in active_generators:
+        raise HTTPException(status_code=400, detail=f"Job {job_id} is not running")
+
+    try:
+        generator = active_generators[job_id]
+
+        # Determine scenario to apply
+        if request.scenario:
+            scenario_modification = request.scenario
+            description = request.description or "Custom scenario"
+        elif request.template_name:
+            # Find template
+            templates = get_predefined_templates()
+            template = next((t for t in templates if t["name"] == request.template_name), None)
+            if not template:
+                raise HTTPException(status_code=404, detail=f"Template '{request.template_name}' not found")
+
+            scenario_modification = ScenarioModification(**template["modification"])
+            description = f"Template: {template['description']}"
+
+            # Override duration if specified
+            if not request.duration_minutes:
+                request.duration_minutes = template.get("default_duration_minutes")
+        else:
+            raise HTTPException(status_code=400, detail="Must specify either 'scenario' or 'template_name'")
+
+        # Generate scenario ID
+        scenario_id = str(uuid.uuid4())[:8]
+
+        # Calculate end time
+        ends_at = None
+        if request.duration_minutes:
+            ends_at = datetime.now() + timedelta(minutes=request.duration_minutes)
+
+        # Apply scenario to generator
+        generator.apply_scenario(scenario_id, scenario_modification)
+
+        # Store active scenario
+        active_scenario = ActiveScenario(
+            id=scenario_id,
+            job_id=job_id,
+            description=description,
+            modification=scenario_modification,
+            started_at=datetime.now(),
+            ends_at=ends_at,
+            status="active"
+        )
+
+        active_scenarios[scenario_id] = active_scenario
+
+        return {
+            "status": "applied",
+            "scenario_id": scenario_id,
+            "job_id": job_id,
+            "description": description,
+            "ends_at": ends_at.isoformat() if ends_at else None
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to apply scenario: {e}")
+
+@app.get("/scenarios/active/{job_id}", summary="List active scenarios for job")
+async def get_active_scenarios(job_id: str):
+    """
+    Returns all active scenarios for a specific job.
+    """
+    if job_id not in active_jobs:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    # Filter scenarios for this job and clean up expired ones
+    job_scenarios = []
+    current_time = datetime.now()
+    expired_scenarios = []
+
+    for scenario_id, scenario in active_scenarios.items():
+        if scenario.job_id == job_id:
+            # Check if scenario has expired
+            if scenario.ends_at and current_time > scenario.ends_at:
+                expired_scenarios.append(scenario_id)
+                # Stop scenario in generator
+                if job_id in active_generators:
+                    try:
+                        active_generators[job_id].stop_scenario(scenario_id)
+                    except:
+                        pass  # Generator might not support this scenario anymore
+            else:
+                job_scenarios.append(scenario)
+
+    # Clean up expired scenarios
+    for scenario_id in expired_scenarios:
+        del active_scenarios[scenario_id]
+
+    return {
+        "job_id": job_id,
+        "active_scenarios": [scenario.dict() for scenario in job_scenarios],
+        "total_active": len(job_scenarios)
+    }
+
+@app.delete("/scenarios/{scenario_id}", summary="Stop specific scenario")
+async def stop_scenario(scenario_id: str):
+    """
+    Stops a specific active scenario.
+    """
+    if scenario_id not in active_scenarios:
+        raise HTTPException(status_code=404, detail=f"Scenario {scenario_id} not found")
+
+    scenario = active_scenarios[scenario_id]
+    job_id = scenario.job_id
+
+    try:
+        # Stop scenario in generator if job is still running
+        if job_id in active_generators:
+            active_generators[job_id].stop_scenario(scenario_id)
+
+        # Remove from active scenarios
+        del active_scenarios[scenario_id]
+
+        return {
+            "status": "stopped",
+            "scenario_id": scenario_id,
+            "job_id": job_id
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to stop scenario: {e}")
+
+@app.get("/scenarios/templates", summary="Get predefined scenario templates")
+async def get_scenario_templates():
+    """
+    Returns all available predefined scenario templates.
+    """
+    templates = get_predefined_templates()
+    return {
+        "templates": templates,
+        "total": len(templates)
+    }

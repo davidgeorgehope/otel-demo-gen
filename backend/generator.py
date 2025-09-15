@@ -11,7 +11,7 @@ import uuid
 from typing import Dict, List, Any, Tuple, Union, Optional
 from datetime import datetime, timezone
 
-from config_schema import ScenarioConfig, Service, ServiceDependency, DbDependency, CacheDependency, LatencyConfig, Operation, BusinessDataField
+from config_schema import ScenarioConfig, Service, ServiceDependency, DbDependency, CacheDependency, LatencyConfig, Operation, BusinessDataField, ScenarioModification
 from k8s_metrics_generator import K8sMetricsGenerator
 
 class TelemetryGenerator:
@@ -98,6 +98,10 @@ class TelemetryGenerator:
 
         # State for metric counters
         self._request_counters = {s.name: 0 for s in self.config.services}
+
+        # Scenario injection system
+        self._active_scenarios: Dict[str, ScenarioModification] = {}  # scenario_id -> modification
+        self._scenario_lock = threading.Lock()  # Thread safety for scenario modifications
         self._error_counters = {s.name: 0 for s in self.config.services}
         self._runtime_counters = {s.name: 0 for s in self.config.services}
 
@@ -286,6 +290,177 @@ class TelemetryGenerator:
         self.client.close()
         print("Generator stopped.")
 
+    def apply_scenario(self, scenario_id: str, scenario: ScenarioModification):
+        """Applies a scenario modification to the telemetry generation."""
+        with self._scenario_lock:
+            self._active_scenarios[scenario_id] = scenario
+            print(f"Applied scenario '{scenario_id}': {scenario.type} targeting {scenario.target_services}")
+
+    def stop_scenario(self, scenario_id: str):
+        """Stops a specific scenario."""
+        with self._scenario_lock:
+            if scenario_id in self._active_scenarios:
+                scenario = self._active_scenarios.pop(scenario_id)
+                print(f"Stopped scenario '{scenario_id}': {scenario.type}")
+            else:
+                print(f"Scenario '{scenario_id}' not found")
+
+    def get_active_scenarios(self) -> Dict[str, ScenarioModification]:
+        """Returns copy of currently active scenarios."""
+        with self._scenario_lock:
+            return self._active_scenarios.copy()
+
+    def _generate_realistic_log_message(self, service_name: str, span: Dict[str, Any], is_error: bool = False) -> str:
+        """Generate realistic log message using LLM-generated samples."""
+        service = self.services_map.get(service_name)
+        if not service or not service.log_samples:
+            # Fallback to default messages
+            if is_error:
+                return f"Operation '{span['name']}' failed unexpectedly."
+            return f"Operation '{span['name']}' handled."
+
+        # Filter log samples by level
+        if is_error:
+            error_samples = [log for log in service.log_samples if log.level in ["ERROR", "WARN"]]
+            if error_samples:
+                log_sample = secrets.choice(error_samples)
+            else:
+                return f"Operation '{span['name']}' failed unexpectedly."
+        else:
+            info_samples = [log for log in service.log_samples if log.level in ["INFO", "DEBUG"]]
+            if info_samples:
+                log_sample = secrets.choice(info_samples)
+            else:
+                return f"Operation '{span['name']}' handled."
+
+        # Replace placeholders in the message
+        message = log_sample.message
+        replacements = {
+            "{user_id}": f"user_{secrets.randbelow(99999):05d}",
+            "{order_id}": f"ORD-{secrets.randbelow(999999):06d}",
+            "{payment_id}": f"PAY-{secrets.randbelow(999999):06d}",
+            "{duration_ms}": str(secrets.randbelow(500) + 10),
+            "{timeout_ms}": str(secrets.randbelow(5000) + 1000),
+            "{error_reason}": secrets.choice(["timeout", "connection_failed", "invalid_data", "rate_limit_exceeded"]),
+            "{region}": secrets.choice(["us-east-1", "us-west-2", "eu-west-1"]),
+            "{product_id}": f"PROD-{secrets.randbelow(9999):04d}",
+            "{item_count}": str(secrets.randbelow(10) + 1),
+            "{order_total}": f"{random.uniform(10.99, 599.99):.2f}",
+            "{payment_method}": secrets.choice(["credit_card_visa", "paypal", "bank_transfer"]),
+            "{session_id}": f"sess_{uuid.uuid4().hex[:8]}",
+        }
+
+        for placeholder, value in replacements.items():
+            message = message.replace(placeholder, value)
+
+        # Inject contextual data from scenarios
+        is_error_span = span.get("status", {}).get("code") == "STATUS_CODE_ERROR"
+        contextual_attrs = self._get_contextual_attributes(service_name, is_failure=is_error and is_error_span)
+        message = self._inject_contextual_data_into_log_message(message, contextual_attrs)
+
+        return message
+
+    def _apply_scenario_modifications(self, service_name: str, operation_name: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Applies scenario modifications and returns modification parameters.
+        Returns dict with keys like 'latency_multiplier', 'error_rate_override', etc.
+        """
+        modifications = {}
+
+        with self._scenario_lock:
+            for scenario_id, scenario in self._active_scenarios.items():
+                # Check if this scenario applies to this service
+                if service_name not in scenario.target_services:
+                    continue
+
+                # Check if this scenario applies to this operation (if specified)
+                if scenario.target_operations and operation_name not in scenario.target_operations:
+                    continue
+
+                # Apply modifications based on scenario type
+                if scenario.type == "latency_spike":
+                    for param in scenario.parameters:
+                        if param.key == "multiplier":
+                            modifications["latency_multiplier"] = modifications.get("latency_multiplier", 1.0) * param.value
+                        elif param.key == "base_latency_ms":
+                            modifications["base_latency_ms"] = max(modifications.get("base_latency_ms", 0), param.value)
+
+                elif scenario.type == "error_rate":
+                    for param in scenario.parameters:
+                        if param.key == "error_percentage":
+                            # Take the highest error rate if multiple scenarios apply
+                            modifications["error_rate_override"] = max(modifications.get("error_rate_override", 0), param.value / 100.0)
+                        elif param.key == "error_code":
+                            modifications["error_code"] = param.value
+
+                elif scenario.type == "service_unavailable":
+                    for param in scenario.parameters:
+                        if param.key == "unavailable_percentage":
+                            modifications["unavailable_rate"] = max(modifications.get("unavailable_rate", 0), param.value / 100.0)
+
+                elif scenario.type == "database_slow":
+                    for param in scenario.parameters:
+                        if param.key == "query_delay_ms":
+                            modifications["db_delay_ms"] = max(modifications.get("db_delay_ms", 0), param.value)
+
+                elif scenario.type == "memory_pressure":
+                    for param in scenario.parameters:
+                        if param.key == "memory_percentage":
+                            modifications["memory_usage_override"] = max(modifications.get("memory_usage_override", 0), param.value / 100.0)
+
+                elif scenario.type == "cpu_spike":
+                    for param in scenario.parameters:
+                        if param.key == "cpu_percentage":
+                            modifications["cpu_usage_override"] = max(modifications.get("cpu_usage_override", 0), param.value / 100.0)
+
+                elif scenario.type == "network_partition":
+                    for param in scenario.parameters:
+                        if param.key == "additional_latency_ms":
+                            modifications["additional_latency_ms"] = modifications.get("additional_latency_ms", 0) + param.value
+                        elif param.key == "packet_loss_percentage":
+                            modifications["packet_loss_rate"] = max(modifications.get("packet_loss_rate", 0), param.value / 100.0)
+
+        return modifications
+
+    def _get_contextual_attributes(self, service_name: str, is_failure: bool = False) -> Dict[str, Any]:
+        """
+        Get contextual attributes based on active scenarios and failure state.
+        Returns attributes that should be added to spans and logs.
+        """
+        attributes = {}
+
+        with self._scenario_lock:
+            for scenario_id, scenario in self._active_scenarios.items():
+                # Check if this scenario applies to this service
+                if service_name not in scenario.target_services:
+                    continue
+
+                # Apply contextual patterns
+                for pattern in scenario.contextual_patterns:
+                    if is_failure and pattern.failure_values:
+                        # Use failure-specific values
+                        value = secrets.choice(pattern.failure_values)
+                    elif pattern.normal_values:
+                        # Use normal values
+                        value = secrets.choice(pattern.normal_values)
+                    else:
+                        continue
+
+                    attributes[pattern.attribute_name] = value
+
+        return attributes
+
+    def _inject_contextual_data_into_log_message(self, message: str, contextual_attrs: Dict[str, Any]) -> str:
+        """
+        Inject contextual data into log message placeholders.
+        """
+        for attr_name, value in contextual_attrs.items():
+            # Convert attribute names to placeholder format
+            placeholder = "{" + attr_name.replace(".", "_") + "}"
+            message = message.replace(placeholder, str(value))
+
+        return message
+
     def generate_and_send_traces_and_logs(self):
         """Generates and sends a single trace and its associated logs."""
         if not self.collector_url:
@@ -419,11 +594,31 @@ class TelemetryGenerator:
             return f"HTTP {status_code // 100}xx"
         return "Unknown"
 
-    def _get_latency_ns(self, latency_config: Optional['LatencyConfig']) -> int:
-        """Calculates a latency in nanoseconds based on a LatencyConfig."""
+    def _get_latency_ns(self, latency_config: Optional['LatencyConfig'], service_name: str = "", operation_name: str = "") -> int:
+        """Calculates a latency in nanoseconds based on a LatencyConfig and scenario modifications."""
+        base_latency_ms = 0
+
+        # Get base latency from config
         if latency_config and random.random() < latency_config.probability:
-            return random.randint(latency_config.min_ms, latency_config.max_ms) * 1_000_000
-        return 0
+            base_latency_ms = random.randint(latency_config.min_ms, latency_config.max_ms)
+
+        # Apply scenario modifications
+        if service_name:
+            modifications = self._apply_scenario_modifications(service_name, operation_name)
+
+            # Apply latency multiplier
+            if "latency_multiplier" in modifications:
+                base_latency_ms = int(base_latency_ms * modifications["latency_multiplier"])
+
+            # Apply base latency override
+            if "base_latency_ms" in modifications:
+                base_latency_ms = max(base_latency_ms, modifications["base_latency_ms"])
+
+            # Apply additional network latency
+            if "additional_latency_ms" in modifications:
+                base_latency_ms += modifications["additional_latency_ms"]
+
+        return base_latency_ms * 1_000_000
 
     def _generate_business_data_attributes(self, operation: Operation) -> Dict[str, Any]:
         """Generates business data attributes based on the operation's business_data configuration."""
@@ -547,26 +742,30 @@ class TelemetryGenerator:
 
             log_records = []
             for span in spans:
+                # Generate realistic info log
+                info_message = self._generate_realistic_log_message(service_name, span, is_error=False)
                 info_log = {
                     "timeUnixNano": span["endTimeUnixNano"],
                     "severityText": "INFO",
                     "severityNumber": self.SEVERITY_NUMBER_MAP["INFO"],
-                    "body": {"stringValue": f"Operation '{span['name']}' handled."},
+                    "body": {"stringValue": info_message},
                     "traceId": span["traceId"],
                     "spanId": span["spanId"],
                 }
                 log_records.append(info_log)
 
                 if span["status"]["code"] == "STATUS_CODE_ERROR":
+                    # Generate realistic error log
+                    error_message = self._generate_realistic_log_message(service_name, span, is_error=True)
                     error_log = {
                         "timeUnixNano": span["endTimeUnixNano"],
                         "severityText": "ERROR",
                         "severityNumber": self.SEVERITY_NUMBER_MAP["ERROR"],
-                        "body": {"stringValue": f"Operation '{span['name']}' failed unexpectedly."},
+                        "body": {"stringValue": error_message},
                         "traceId": span["traceId"],
                         "spanId": span["spanId"],
                         "attributes": self._format_attributes({
-                            "exception.type": "RuntimeException", 
+                            "exception.type": "RuntimeException",
                             "exception.message": "An artificial error occurred",
                             "exception.stacktrace": "java.lang.RuntimeException: An artificial error occurred\n\tat com.example.Service.process(Service.java:42)\n\tat com.example.Controller.handle(Controller.java:23)"
                         }),
@@ -601,12 +800,23 @@ class TelemetryGenerator:
         for service in self.config.services:
             metrics = []
 
+            # Apply scenario modifications
+            modifications = self._apply_scenario_modifications(service.name)
+
             # --- Standard Metrics ---
+            cpu_utilization = random.uniform(0.1, 0.9)
+            if "cpu_usage_override" in modifications:
+                cpu_utilization = modifications["cpu_usage_override"]
             metrics.append(self._create_gauge_metric("system.cpu.utilization", "%", [
-                {"timeUnixNano": current_time_ns, "asDouble": random.uniform(0.1, 0.9)}
+                {"timeUnixNano": current_time_ns, "asDouble": cpu_utilization}
             ]))
+
+            memory_usage = random.randint(200_000_000, 800_000_000)
+            if "memory_usage_override" in modifications:
+                # Convert percentage to bytes (assuming 1GB total for demo)
+                memory_usage = int(modifications["memory_usage_override"] * 1_000_000_000)
             metrics.append(self._create_gauge_metric("process.memory.usage", "By", [
-                {"timeUnixNano": current_time_ns, "asInt": str(random.randint(200_000_000, 800_000_000))}
+                {"timeUnixNano": current_time_ns, "asInt": str(memory_usage)}
             ]))
 
             self._request_counters[service.name] += random.randint(5, 20)
@@ -614,7 +824,14 @@ class TelemetryGenerator:
                 {"timeUnixNano": current_time_ns, "startTimeUnixNano": str(time.time_ns() - 3600_000_000_000), "asInt": str(self._request_counters[service.name])}
             ]))
 
-            if random.random() < self.config.telemetry.error_rate:
+            # Check for scenario-overridden error rates
+            error_rate = self.config.telemetry.error_rate
+            if "error_rate_override" in modifications:
+                error_rate = modifications["error_rate_override"]
+            elif "unavailable_rate" in modifications:
+                error_rate = max(error_rate, modifications["unavailable_rate"])
+
+            if random.random() < error_rate:
                 self._error_counters[service.name] += 1
             metrics.append(self._create_sum_metric("http.server.request.error.count", "errors", True, [
                 {"timeUnixNano": current_time_ns, "startTimeUnixNano": str(time.time_ns() - 3600_000_000_000), "asInt": str(self._error_counters[service.name])}
@@ -675,10 +892,30 @@ class TelemetryGenerator:
         entry_point = secrets.choice(entry_points)
 
         trace_id = self._generate_id(16)
+
+        # Determine if trace has error, considering scenario modifications
         trace_has_error = random.random() < self.config.telemetry.error_rate
-        
-        # If an error occurs, pick a random service to be the initial point of failure.
-        error_source = secrets.choice(self.config.services).name if trace_has_error else None
+        error_source = None
+
+        # Check for scenario-induced errors
+        for service in self.config.services:
+            modifications = self._apply_scenario_modifications(service.name)
+
+            # Check for service unavailability
+            if "unavailable_rate" in modifications and random.random() < modifications["unavailable_rate"]:
+                trace_has_error = True
+                error_source = service.name
+                break
+
+            # Check for overridden error rates
+            if "error_rate_override" in modifications and random.random() < modifications["error_rate_override"]:
+                trace_has_error = True
+                error_source = service.name
+                break
+
+        # If no scenario-specific error and base error rate triggered, pick random service
+        if trace_has_error and not error_source:
+            error_source = secrets.choice(self.config.services).name
         
         self._generate_span_recursive(
             service_name=entry_point.name,
@@ -734,7 +971,12 @@ class TelemetryGenerator:
         own_processing_time_ns = secrets.randbelow(20_000_000) + 5_000_000
         # Add latency from the operation, if defined
         if operation and operation.latency:
-            own_processing_time_ns += self._get_latency_ns(operation.latency)
+            own_processing_time_ns += self._get_latency_ns(operation.latency, service_name, operation.name)
+
+        # Apply scenario modifications even if no operation-specific latency
+        else:
+            scenario_latency_ns = self._get_latency_ns(None, service_name)
+            own_processing_time_ns += scenario_latency_ns
 
         # Determine the span name
         span_name = ""
@@ -771,6 +1013,11 @@ class TelemetryGenerator:
         if operation:
             business_attributes = self._generate_business_data_attributes(operation)
             attributes.update(business_attributes)
+
+        # --- Add contextual attributes from active scenarios ---
+        is_error = (error_source == service_name)
+        contextual_attrs = self._get_contextual_attributes(service_name, is_failure=is_error)
+        attributes.update(contextual_attrs)
 
         service_span = {
             "traceId": trace_id,
@@ -912,7 +1159,7 @@ class TelemetryGenerator:
         # Base duration is now just for the network hop, as recursive call determines total time
         network_hop_duration = secrets.randbelow(2_000_000) + 500_000
         # Add specific dependency latency if configured
-        network_hop_duration += self._get_latency_ns(dep.latency)
+        network_hop_duration += self._get_latency_ns(dep.latency, service.name)
 
         downstream_start_time = start_time + network_hop_duration
         # The end time is now determined by the recursive call, so we set it later.
@@ -952,7 +1199,12 @@ class TelemetryGenerator:
 
     def _create_db_span(self, service: Service, dep: Union[DbDependency, CacheDependency], trace_id, parent_id, child_id, start_time, operation: Optional[Operation]):
         duration = secrets.randbelow(30_000_000) + 5_000_000  # 5-35ms for db query
-        duration += self._get_latency_ns(dep.latency)
+        duration += self._get_latency_ns(dep.latency, service.name)
+
+        # Apply database scenario modifications
+        modifications = self._apply_scenario_modifications(service.name)
+        if "db_delay_ms" in modifications:
+            duration += modifications["db_delay_ms"] * 1_000_000
         end_time = start_time + duration
         
         if isinstance(dep, DbDependency):

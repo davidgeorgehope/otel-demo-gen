@@ -6,6 +6,7 @@ import ConfigDisplay from './components/ConfigDisplay'
 import Controls from './components/Controls'
 import StatusBar from './components/StatusBar'
 import JobsPage from './components/JobsPage'
+import ScenariosPage from './components/ScenariosPage'
 import { api } from './utils/api'
 
 function App() {
@@ -17,7 +18,7 @@ function App() {
   const [isDemoRunning, setIsDemoRunning] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
-  const [activeTab, setActiveTab] = useState('create') // 'create' or 'jobs'
+  const [activeTab, setActiveTab] = useState('create') // 'create', 'jobs', or 'scenarios'
   const [currentJobId, setCurrentJobId] = useState(null)
   const [currentJobStatus, setCurrentJobStatus] = useState(null)
   const [currentJobError, setCurrentJobError] = useState(null)
@@ -113,6 +114,10 @@ function App() {
       return <JobsPage />
     }
 
+    if (activeTab === 'scenarios') {
+      return <ScenariosPage />
+    }
+
     return (
       <main className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         <div className="flex flex-col gap-8">
@@ -175,6 +180,16 @@ function App() {
             }`}
           >
             Manage Jobs
+          </button>
+          <button
+            onClick={() => setActiveTab('scenarios')}
+            className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
+              activeTab === 'scenarios'
+                ? 'bg-blue-600 text-white'
+                : 'text-gray-300 hover:text-white hover:bg-gray-700'
+            }`}
+          >
+            Simulate Outages
           </button>
         </div>
 

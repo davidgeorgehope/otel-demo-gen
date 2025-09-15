@@ -108,6 +108,11 @@ The user will describe a scenario, and you will produce a YAML configuration rep
     *   To simulate performance issues, you can add a **`latency`** block to operations or dependencies. For example, to make a reporting operation slow, add `latency: {min_ms: 800, max_ms: 1500}`.
     *   To simulate intermittent slowness on a dependency, add a `latency` block with a `probability` less than 1.0 (e.g., `probability: 0.1` for 10% of the time).
     *   **NEW:** Add **`business_data`** to operations to include realistic business-relevant data in traces. This makes demos much more realistic by adding fields like shopping cart amounts, user IDs, product counts, etc.
+3.5 **CRITICAL:** For each service, you MUST include **`log_samples`** - an array of 8-10 realistic log messages that the service would generate.
+    *   Include 6-8 INFO level logs for normal operations
+    *   Include 2 ERROR level logs for failure scenarios
+    *   Use realistic message templates with placeholders like {user_id}, {order_id}, {duration_ms}
+    *   Make logs contextually relevant to the service's business purpose
 4.  For database dependencies, you can add a list of **`example_queries`** that are realistic for the specified database type (e.g., SQL for Postgres, JSON for MongoDB).
 5.  Create plausible dependencies: frontends call backends, backends use databases. Ensure the generated scenario is coherent.
 6.  Assign a variety of languages to the services to showcase a polyglot environment.
@@ -147,6 +152,23 @@ services:
           - name: "order_total"
             type: "number"
             min_value: 10.99
+    log_samples:
+      - level: "INFO"
+        message: "Order {order_id} created successfully for user {user_id} with total ${order_total}"
+      - level: "INFO"
+        message: "Processing payment for order {order_id} via {payment_method}"
+      - level: "INFO"
+        message: "Inventory reserved for order {order_id}: {item_count} items"
+      - level: "INFO"
+        message: "Order {order_id} validation completed in {duration_ms}ms"
+      - level: "INFO"
+        message: "Shipping calculation completed for order {order_id} to {region}"
+      - level: "WARN"
+        message: "Low inventory warning for product {product_id} in order {order_id}"
+      - level: "ERROR"
+        message: "Payment processing failed for order {order_id}: {error_reason}"
+      - level: "ERROR"
+        message: "Database timeout while processing order {order_id} after {timeout_ms}ms"
             max_value: 599.99
           - name: "item_count"
             type: "integer"
