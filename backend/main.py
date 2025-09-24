@@ -43,6 +43,7 @@ JOB_CLEANUP_HOURS = int(os.getenv("JOB_CLEANUP_HOURS", "24"))  # How long to kee
 CLEANUP_INTERVAL_MINUTES = int(os.getenv("CLEANUP_INTERVAL_MINUTES", "15"))  # Cleanup frequency
 CONFIG_JOB_TTL_MINUTES = int(os.getenv("CONFIG_JOB_TTL_MINUTES", "60"))  # Retain finished config jobs
 CONFIG_GENERATION_WORKERS = int(os.getenv("CONFIG_GENERATION_WORKERS", "1"))  # Background workers
+MAX_CONFIG_GENERATION_ATTEMPTS = int(os.getenv("CONFIG_GENERATION_MAX_ATTEMPTS", "3"))  # Total attempts per job
 
 # Job management system - replace global singleton with multi-job support
 class JobInfo(BaseModel):
@@ -79,6 +80,10 @@ class ConfigGenerationJob:
     error_message: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
+    attempts: int = 0
+    max_attempts: int = 1
+    last_error: Optional[str] = None
+    last_yaml: Optional[str] = None
 
 
 config_jobs: Dict[str, ConfigGenerationJob] = {}
@@ -86,6 +91,27 @@ config_jobs_lock = threading.Lock()
 config_job_queue: queue.Queue = queue.Queue()
 config_worker_threads: List[threading.Thread] = []
 config_worker_stop_event = threading.Event()
+
+
+def _build_retry_prompt(description: str, last_error: Optional[str], previous_yaml: Optional[str]) -> str:
+    """Create a prompt that feeds the previous error/output back to the LLM."""
+    guidance_parts = [
+        description.strip(),
+        "\nThe previous YAML output failed to parse with the following error:",
+        last_error or "Unknown validation error.",
+        "\nPlease regenerate a corrected configuration as valid YAML only (no code fences)."
+    ]
+
+    if previous_yaml:
+        guidance_parts.extend([
+            "\nPrevious YAML output for reference:",
+            "```yaml",
+            previous_yaml.strip(),
+            "```",
+            "\nCorrect the issues and ensure the YAML satisfies the previously provided requirements."
+        ])
+
+    return "\n".join(guidance_parts)
 
 
 def config_generation_worker():
@@ -108,22 +134,61 @@ def config_generation_worker():
             job.status = "running"
             job.updated_at = datetime.utcnow()
 
-        try:
-            yaml_config_str = generate_config_from_description(job.description)
-            config_dict = yaml.safe_load(yaml_config_str)
+        success = False
+        last_error: Optional[str] = None
+        last_yaml_output: Optional[str] = None
 
+        for attempt_index in range(job.max_attempts):
             with config_jobs_lock:
-                job.yaml = yaml_config_str.strip()
-                job.config = config_dict
-                job.status = "succeeded"
-                job.error_message = None
+                job.attempts = attempt_index + 1
                 job.updated_at = datetime.utcnow()
 
-        except Exception as e:
+            prompt = job.description
+            if attempt_index > 0:
+                prompt = _build_retry_prompt(job.description, last_error, last_yaml_output)
+
+            try:
+                yaml_config_str = generate_config_from_description(prompt)
+                cleaned_yaml = (yaml_config_str or "").strip()
+                last_yaml_output = cleaned_yaml
+
+                config_dict = yaml.safe_load(cleaned_yaml)
+
+                with config_jobs_lock:
+                    job.yaml = cleaned_yaml
+                    job.config = config_dict
+                    job.status = "succeeded"
+                    job.error_message = None
+                    job.last_error = None
+                    job.last_yaml = cleaned_yaml
+                    job.updated_at = datetime.utcnow()
+                success = True
+                break
+
+            except yaml.YAMLError as err:
+                last_error = f"YAML parsing error: {err}"
+                with config_jobs_lock:
+                    job.last_error = last_error
+                    job.last_yaml = last_yaml_output
+                    job.updated_at = datetime.utcnow()
+                continue
+
+            except Exception as err:
+                last_error = str(err)
+                with config_jobs_lock:
+                    job.last_error = last_error
+                    job.last_yaml = last_yaml_output
+                    job.updated_at = datetime.utcnow()
+                break
+
+        if not success:
             with config_jobs_lock:
                 job.status = "failed"
-                job.error_message = str(e)
+                job.error_message = last_error or "Unknown error during config generation."
                 job.updated_at = datetime.utcnow()
+                if last_yaml_output:
+                    job.yaml = last_yaml_output
+                    job.last_yaml = last_yaml_output
 
         finally:
             config_job_queue.task_done()
@@ -313,6 +378,7 @@ class RestartRequest(BaseModel):
 class GenerateConfigJobResponse(BaseModel):
     job_id: str
     status: Literal["pending", "running", "succeeded", "failed"]
+    max_attempts: int
 
 
 class ConfigJobStatusResponse(BaseModel):
@@ -323,6 +389,9 @@ class ConfigJobStatusResponse(BaseModel):
     error_message: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    attempts: int
+    max_attempts: int
+    last_error: Optional[str] = None
 
 class HealthCheckResponse(BaseModel):
     endpoint: str
@@ -339,14 +408,18 @@ async def request_config_generation(request: GenerateRequest):
         raise HTTPException(status_code=400, detail="Description must not be empty.")
 
     job_id = str(uuid.uuid4())
-    job = ConfigGenerationJob(id=job_id, description=description)
+    job = ConfigGenerationJob(
+        id=job_id,
+        description=description,
+        max_attempts=max(1, MAX_CONFIG_GENERATION_ATTEMPTS),
+    )
 
     with config_jobs_lock:
         config_jobs[job_id] = job
 
     config_job_queue.put(job_id)
 
-    return GenerateConfigJobResponse(job_id=job_id, status=job.status)
+    return GenerateConfigJobResponse(job_id=job_id, status=job.status, max_attempts=job.max_attempts)
 
 
 @app.get("/generate-config/{job_id}", response_model=ConfigJobStatusResponse)
@@ -365,6 +438,9 @@ async def get_config_generation_job(job_id: str):
             error_message=job.error_message,
             created_at=job.created_at,
             updated_at=job.updated_at,
+            attempts=job.attempts,
+            max_attempts=job.max_attempts,
+            last_error=job.last_error,
         )
 
     return ConfigJobStatusResponse(**job_data)
