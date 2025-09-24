@@ -1,5 +1,6 @@
 import yaml
 import uuid
+import re
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Response, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -84,6 +85,7 @@ class ConfigGenerationJob:
     max_attempts: int = 1
     last_error: Optional[str] = None
     last_yaml: Optional[str] = None
+    used_fallback: bool = False
 
 
 config_jobs: Dict[str, ConfigGenerationJob] = {}
@@ -93,12 +95,151 @@ config_worker_threads: List[threading.Thread] = []
 config_worker_stop_event = threading.Event()
 
 
+def _generate_fallback_config(description: str) -> str:
+    """
+    Generate a simplified fallback configuration when LLM generation fails.
+    This creates a basic but valid config based on the user's description.
+    """
+    # Extract some keywords from the description to customize the fallback
+    lower_desc = description.lower()
+
+    # Determine service count (default to 3)
+    service_count = 3
+    if "5" in description or "five" in lower_desc:
+        service_count = 5
+    elif "4" in description or "four" in lower_desc:
+        service_count = 4
+    elif "2" in description or "two" in lower_desc:
+        service_count = 2
+    elif "10" in description or "ten" in lower_desc:
+        service_count = 10
+
+    # Create basic services
+    services = []
+    languages = ["python", "nodejs", "java", "go", "ruby"]
+
+    for i in range(service_count):
+        service = {
+            "name": f"service-{i+1}",
+            "language": languages[i % len(languages)],
+            "operations": [{
+                "name": f"Operation{i+1}",
+                "span_name": f"GET /api/v{i+1}",
+            }],
+            "log_samples": [
+                {"level": "INFO", "message": f"Service {i+1} started successfully"},
+                {"level": "INFO", "message": f"Processing request for operation {i+1}"},
+                {"level": "ERROR", "message": f"Service {i+1} encountered an error"},
+            ]
+        }
+
+        # Add dependencies for services after the first
+        if i > 0:
+            service["depends_on"] = [{"service": f"service-{i}"}]
+
+        services.append(service)
+
+    # Basic database if mentioned
+    databases = []
+    if "database" in lower_desc or "postgres" in lower_desc or "mysql" in lower_desc or "mongodb" in lower_desc:
+        db_type = "postgres"
+        if "mysql" in lower_desc:
+            db_type = "mysql"
+        elif "mongodb" in lower_desc or "mongo" in lower_desc:
+            db_type = "mongodb"
+
+        databases.append({
+            "name": f"{db_type}-main",
+            "type": db_type
+        })
+
+        # Add DB dependency to last service
+        if services:
+            services[-1].setdefault("depends_on", []).append({"db": f"{db_type}-main"})
+
+    # Basic message queue if mentioned
+    message_queues = []
+    if "queue" in lower_desc or "kafka" in lower_desc or "rabbitmq" in lower_desc:
+        queue_type = "kafka" if "kafka" in lower_desc else "rabbitmq"
+        message_queues.append({
+            "name": f"{queue_type}-events",
+            "type": queue_type
+        })
+
+        # Add queue dependency to last service
+        if services:
+            services[-1].setdefault("depends_on", []).append({"queue": f"{queue_type}-events"})
+
+    # Build the config
+    config = {
+        "services": services,
+        "databases": databases,
+        "message_queues": message_queues,
+        "telemetry": {
+            "trace_rate": 2,
+            "error_rate": 0.05,
+            "metrics_interval": 10,
+            "include_logs": True
+        }
+    }
+
+    # Convert to YAML
+    return yaml.dump(config, default_flow_style=False, sort_keys=False)
+
+def _sanitize_yaml_string(yaml_str: str) -> str:
+    """
+    Sanitize YAML string to fix common issues that cause parsing errors.
+    """
+    lines = yaml_str.split('\n')
+    fixed_lines = []
+
+    for line in lines:
+        # Check if line contains a message field with potential quote issues
+        if 'message:' in line:
+            # Extract the message content
+            match = re.match(r'^(\s*-?\s*(?:level:\s*"\w+"\s+)?message:\s*)(.*)$', line)
+            if match:
+                prefix = match.group(1)
+                message_content = match.group(2).strip()
+
+                # If the message starts and ends with quotes, check for internal issues
+                if message_content.startswith('"'):
+                    # Remove outer quotes
+                    if message_content.endswith('"'):
+                        inner_content = message_content[1:-1]
+                    else:
+                        # Unterminated quote - add closing quote
+                        inner_content = message_content[1:]
+                        message_content = f'"{inner_content}"'
+
+                    # Escape internal quotes and problematic characters
+                    inner_content = inner_content.replace('\\', '\\\\')
+                    inner_content = inner_content.replace('"', '\\"')
+
+                    # Reconstruct the line
+                    line = f'{prefix}"{inner_content}"'
+                elif not message_content.startswith('"') and not message_content.startswith("'"):
+                    # Wrap unquoted strings that might have special characters
+                    if any(char in message_content for char in [':', '{', '}', '[', ']', ',', '&', '*', '#', '?', '|', '-', '<', '>', '=', '!', '%', '@', '`']):
+                        # Escape and quote
+                        escaped = message_content.replace('\\', '\\\\').replace('"', '\\"')
+                        line = f'{prefix}"{escaped}"'
+
+        fixed_lines.append(line)
+
+    return '\n'.join(fixed_lines)
+
 def _build_retry_prompt(description: str, last_error: Optional[str], previous_yaml: Optional[str]) -> str:
     """Create a prompt that feeds the previous error/output back to the LLM."""
     guidance_parts = [
         description.strip(),
         "\nThe previous YAML output failed to parse with the following error:",
         last_error or "Unknown validation error.",
+        "\nIMPORTANT: Please ensure all string values in log messages are properly quoted and escaped.",
+        "\nSpecifically:",
+        "- Use double quotes for all message strings",
+        "- Escape any internal quotes with backslash (\\\")",
+        "- Ensure all quotes are properly closed",
         "\nPlease regenerate a corrected configuration as valid YAML only (no code fences)."
     ]
 
@@ -150,9 +291,18 @@ def config_generation_worker():
             try:
                 yaml_config_str = generate_config_from_description(prompt)
                 cleaned_yaml = (yaml_config_str or "").strip()
-                last_yaml_output = cleaned_yaml
 
-                config_dict = yaml.safe_load(cleaned_yaml)
+                # Apply sanitization to fix common YAML issues
+                sanitized_yaml = _sanitize_yaml_string(cleaned_yaml)
+                last_yaml_output = cleaned_yaml  # Store original for debugging
+
+                try:
+                    # First try with sanitized version
+                    config_dict = yaml.safe_load(sanitized_yaml)
+                    cleaned_yaml = sanitized_yaml  # Use sanitized version if it works
+                except yaml.YAMLError:
+                    # If sanitization didn't help, try original
+                    config_dict = yaml.safe_load(cleaned_yaml)
 
                 with config_jobs_lock:
                     job.yaml = cleaned_yaml
@@ -182,13 +332,33 @@ def config_generation_worker():
                 break
 
         if not success:
-            with config_jobs_lock:
-                job.status = "failed"
-                job.error_message = last_error or "Unknown error during config generation."
-                job.updated_at = datetime.utcnow()
-                if last_yaml_output:
-                    job.yaml = last_yaml_output
-                    job.last_yaml = last_yaml_output
+            # Try generating a fallback config as a last resort
+            try:
+                print(f"🔧 Generating fallback config for job {job_id} after {job.attempts} failed attempts")
+                fallback_yaml = _generate_fallback_config(job.description)
+                fallback_config = yaml.safe_load(fallback_yaml)
+
+                with config_jobs_lock:
+                    job.yaml = fallback_yaml
+                    job.config = fallback_config
+                    job.status = "succeeded"
+                    job.error_message = f"Generated fallback config after LLM failures. Original error: {last_error}"
+                    job.last_error = None
+                    job.last_yaml = fallback_yaml
+                    job.updated_at = datetime.utcnow()
+                    job.used_fallback = True
+
+                print(f"✅ Fallback config generated successfully for job {job_id}")
+
+            except Exception as fallback_err:
+                # Even fallback failed, mark as failed
+                with config_jobs_lock:
+                    job.status = "failed"
+                    job.error_message = f"LLM error: {last_error}. Fallback error: {str(fallback_err)}"
+                    job.updated_at = datetime.utcnow()
+                    if last_yaml_output:
+                        job.yaml = last_yaml_output
+                        job.last_yaml = last_yaml_output
 
         config_job_queue.task_done()
 
