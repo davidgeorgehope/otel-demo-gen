@@ -64,7 +64,7 @@ function App() {
 
   const pollConfigGenerationJob = async (jobId) => {
     const pollIntervalMs = 2000
-    const maxWaitMs = 120000
+    const maxWaitMs = 300000 // 5 minutes timeout for config generation
     let elapsedMs = 0
 
     while (true) {
