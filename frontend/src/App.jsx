@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import yaml from 'js-yaml'
 import Header from './components/Header'
 import ScenarioForm from './components/ScenarioForm'
@@ -22,6 +22,9 @@ function App() {
   const [currentJobId, setCurrentJobId] = useState(null)
   const [currentJobStatus, setCurrentJobStatus] = useState(null)
   const [currentJobError, setCurrentJobError] = useState(null)
+  const [configJobId, setConfigJobId] = useState(null)
+  const [configJobStatus, setConfigJobStatus] = useState(null)
+  const activeConfigJobRef = useRef(null)
 
   // Sync state with backend status
   const checkStatus = async () => {
@@ -59,18 +62,77 @@ function App() {
     return () => clearInterval(interval)
   }, [])
 
+  const pollConfigGenerationJob = async (jobId) => {
+    const pollIntervalMs = 2000
+    const maxWaitMs = 120000
+    let elapsedMs = 0
+
+    while (true) {
+      if (activeConfigJobRef.current !== jobId) {
+        return
+      }
+
+      try {
+        const status = await api.get(`/generate-config/${jobId}`)
+        setConfigJobStatus(status.status)
+
+        if (status.status === 'succeeded') {
+          setYamlConfig(status.yaml || '')
+          setError('')
+          setIsLoading(false)
+          activeConfigJobRef.current = null
+          return
+        }
+
+        if (status.status === 'failed') {
+          const message = status.error_message || 'Config generation failed.'
+          setError(`Error generating config: ${message}`)
+          setIsLoading(false)
+          activeConfigJobRef.current = null
+          return
+        }
+      } catch (pollError) {
+        console.error('Failed to fetch config generation status:', pollError)
+        setError(`Error checking config status: ${pollError.message}`)
+        setConfigJobStatus('failed')
+        setIsLoading(false)
+        activeConfigJobRef.current = null
+        return
+      }
+
+      if (elapsedMs >= maxWaitMs) {
+        setError('Timed out waiting for config generation. Please try again.')
+        setConfigJobStatus('failed')
+        setIsLoading(false)
+        activeConfigJobRef.current = null
+        return
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+      elapsedMs += pollIntervalMs
+    }
+  }
+
   const handleGenerateConfig = async () => {
     setIsLoading(true)
     setYamlConfig('')
     setError('')
+    setConfigJobStatus('pending')
+    setConfigJobId(null)
+
     try {
       const data = await api.post('/generate-config', { description: scenario })
-      setYamlConfig(data.yaml)
+      const jobId = data.job_id
+      setConfigJobStatus(data.status || 'pending')
+      setConfigJobId(jobId)
+      activeConfigJobRef.current = jobId
+      await pollConfigGenerationJob(jobId)
     } catch (error) {
-      console.error("Failed to generate config:", error)
+      console.error('Failed to start config generation job:', error)
       setError(`Error generating config: ${error.message}`)
-    } finally {
       setIsLoading(false)
+      setConfigJobStatus('failed')
+      activeConfigJobRef.current = null
     }
   }
 
@@ -127,6 +189,8 @@ function App() {
             handleGenerateConfig={handleGenerateConfig}
             isLoading={isLoading}
             setYamlConfig={setYamlConfig}
+            configJobId={configJobId}
+            configJobStatus={configJobStatus}
           />
           {yamlConfig && (
              <Controls

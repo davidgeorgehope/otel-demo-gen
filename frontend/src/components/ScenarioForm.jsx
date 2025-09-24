@@ -2,7 +2,15 @@ import React from 'react';
 import LLMStatus from './LLMStatus';
 import { API_BASE_URL } from '../config';
 
-const ScenarioForm = ({ scenario, setScenario, handleGenerateConfig, isLoading, setYamlConfig }) => {
+const ScenarioForm = ({
+  scenario,
+  setScenario,
+  handleGenerateConfig,
+  isLoading,
+  setYamlConfig,
+  configJobId,
+  configJobStatus
+}) => {
   const handleLoadTestConfig = async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/test-config`)
@@ -46,6 +54,15 @@ const ScenarioForm = ({ scenario, setScenario, handleGenerateConfig, isLoading, 
             Load Test Config
           </button>
         </div>
+        {configJobId && (
+          <div className="mt-2 text-sm text-gray-400">
+            <span className="font-medium text-gray-300">Config job:</span>{' '}
+            <span className="font-mono">{configJobId}</span>
+            {configJobStatus && (
+              <span className="ml-2 capitalize">[{configJobStatus}]</span>
+            )}
+          </div>
+        )}
       </div>
       
       <LLMStatus />

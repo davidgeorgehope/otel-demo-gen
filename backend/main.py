@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Response, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Literal
 from pydantic import BaseModel
 import os
 import asyncio
@@ -11,6 +11,8 @@ import threading
 import time
 import httpx
 import json
+import queue
+from dataclasses import dataclass, field
 
 from config_schema import GenerateConfigRequest, StartDemoRequest, ScenarioConfig, ScenarioGenerationRequest, ScenarioApplyRequest, ActiveScenario, ScenarioModification
 from generator import TelemetryGenerator
@@ -39,6 +41,8 @@ MAX_JOBS_PER_USER = int(os.getenv("MAX_JOBS_PER_USER", "3"))  # Maximum jobs per
 MAX_JOB_DURATION_HOURS = int(os.getenv("MAX_JOB_DURATION_HOURS", "24"))  # Maximum job runtime
 JOB_CLEANUP_HOURS = int(os.getenv("JOB_CLEANUP_HOURS", "24"))  # How long to keep stopped jobs
 CLEANUP_INTERVAL_MINUTES = int(os.getenv("CLEANUP_INTERVAL_MINUTES", "15"))  # Cleanup frequency
+CONFIG_JOB_TTL_MINUTES = int(os.getenv("CONFIG_JOB_TTL_MINUTES", "60"))  # Retain finished config jobs
+CONFIG_GENERATION_WORKERS = int(os.getenv("CONFIG_GENERATION_WORKERS", "1"))  # Background workers
 
 # Job management system - replace global singleton with multi-job support
 class JobInfo(BaseModel):
@@ -63,6 +67,91 @@ active_scenarios: Dict[str, ActiveScenario] = {}  # scenario_id -> ActiveScenari
 # Cleanup tracking
 cleanup_thread: Optional[threading.Thread] = None
 cleanup_stop_event = threading.Event()
+
+
+@dataclass
+class ConfigGenerationJob:
+    id: str
+    description: str
+    status: Literal["pending", "running", "succeeded", "failed"] = "pending"
+    yaml: Optional[str] = None
+    config: Optional[dict] = None
+    error_message: Optional[str] = None
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+
+
+config_jobs: Dict[str, ConfigGenerationJob] = {}
+config_jobs_lock = threading.Lock()
+config_job_queue: queue.Queue = queue.Queue()
+config_worker_threads: List[threading.Thread] = []
+config_worker_stop_event = threading.Event()
+
+
+def config_generation_worker():
+    """Worker that processes config generation jobs asynchronously."""
+    while not config_worker_stop_event.is_set():
+        try:
+            job_id = config_job_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+
+        if job_id is None:
+            config_job_queue.task_done()
+            continue
+
+        with config_jobs_lock:
+            job = config_jobs.get(job_id)
+            if not job:
+                config_job_queue.task_done()
+                continue
+            job.status = "running"
+            job.updated_at = datetime.utcnow()
+
+        try:
+            yaml_config_str = generate_config_from_description(job.description)
+            config_dict = yaml.safe_load(yaml_config_str)
+
+            with config_jobs_lock:
+                job.yaml = yaml_config_str.strip()
+                job.config = config_dict
+                job.status = "succeeded"
+                job.error_message = None
+                job.updated_at = datetime.utcnow()
+
+        except Exception as e:
+            with config_jobs_lock:
+                job.status = "failed"
+                job.error_message = str(e)
+                job.updated_at = datetime.utcnow()
+
+        finally:
+            config_job_queue.task_done()
+
+
+def start_config_generation_workers():
+    """Start config generation worker threads if not already running."""
+    if config_worker_threads:
+        return
+
+    worker_count = max(1, CONFIG_GENERATION_WORKERS)
+    for _ in range(worker_count):
+        worker = threading.Thread(target=config_generation_worker, daemon=True)
+        config_worker_threads.append(worker)
+        worker.start()
+    print(f"Started {len(config_worker_threads)} config generation worker(s)")
+
+
+def stop_config_generation_workers():
+    """Signal workers to stop and wait briefly for shutdown."""
+    config_worker_stop_event.set()
+    for _ in config_worker_threads:
+        config_job_queue.put(None)
+    for worker in config_worker_threads:
+        worker.join(timeout=5)
+    config_worker_threads.clear()
+    print("Stopped config generation workers")
+
 
 def handle_generator_failure(job_id: str, error_message: str):
     """Callback function to handle generator failures and update job status."""
@@ -131,6 +220,25 @@ def cleanup_old_jobs():
         except Exception as e:
             print(f"Error stopping timed-out job {job_id}: {e}")
 
+    cleanup_config_jobs(current_time)
+
+
+def cleanup_config_jobs(current_time: Optional[datetime] = None):
+    """Remove completed config generation jobs beyond the retention window."""
+    if current_time is None:
+        current_time = datetime.now()
+
+    cutoff_time = current_time - timedelta(minutes=CONFIG_JOB_TTL_MINUTES)
+
+    with config_jobs_lock:
+        expired_jobs = [job_id for job_id, job in config_jobs.items()
+                        if job.updated_at < cutoff_time and job.status in {"succeeded", "failed"}]
+
+        for job_id in expired_jobs:
+            del config_jobs[job_id]
+            print(f"Cleaned up config generation job: {job_id}")
+
+
 def cleanup_worker():
     """Background worker for periodic cleanup of jobs."""
     while not cleanup_stop_event.is_set():
@@ -161,6 +269,7 @@ def stop_cleanup_worker():
 
 # Start cleanup worker on application startup
 start_cleanup_worker()
+start_config_generation_workers()
 
 # --- Models ---
 class GenerateRequest(BaseModel):
@@ -200,48 +309,65 @@ class RestartRequest(BaseModel):
     api_key: Optional[str] = None
     auth_type: Optional[str] = None
 
+
+class GenerateConfigJobResponse(BaseModel):
+    job_id: str
+    status: Literal["pending", "running", "succeeded", "failed"]
+
+
+class ConfigJobStatusResponse(BaseModel):
+    job_id: str
+    status: Literal["pending", "running", "succeeded", "failed"]
+    yaml: Optional[str] = None
+    config: Optional[dict] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
 class HealthCheckResponse(BaseModel):
     endpoint: str
     status: str  # "healthy", "unhealthy"
     response_time_ms: Optional[int] = None
     error: Optional[str] = None
 
-@app.post("/generate-config", response_model=dict)
-async def generate_config(request: GenerateRequest):
-    """
-    Generates a scenario configuration from a user description using an LLM.
-    """
-    try:
-        # Offload blocking LLM call to thread pool so the event loop stays responsive.
-        yaml_config_str = await asyncio.to_thread(
-            generate_config_from_description,
-            request.description,
+
+@app.post("/generate-config", response_model=GenerateConfigJobResponse, status_code=202)
+async def request_config_generation(request: GenerateRequest):
+    """Create an asynchronous config generation job and return its identifier."""
+    description = request.description.strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="Description must not be empty.")
+
+    job_id = str(uuid.uuid4())
+    job = ConfigGenerationJob(id=job_id, description=description)
+
+    with config_jobs_lock:
+        config_jobs[job_id] = job
+
+    config_job_queue.put(job_id)
+
+    return GenerateConfigJobResponse(job_id=job_id, status=job.status)
+
+
+@app.get("/generate-config/{job_id}", response_model=ConfigJobStatusResponse)
+async def get_config_generation_job(job_id: str):
+    """Fetch the current status (and result if available) for a config generation job."""
+    with config_jobs_lock:
+        job = config_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Config generation job not found.")
+
+        job_data = dict(
+            job_id=job.id,
+            status=job.status,
+            yaml=job.yaml,
+            config=job.config,
+            error_message=job.error_message,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
         )
-        # Validate that the output is valid YAML
-        config_dict = yaml.safe_load(yaml_config_str)
-        return {"yaml": yaml_config_str, "config": config_dict}
-    except ValueError as e:
-        # Handle missing API keys or configuration errors
-        error_message = str(e)
-        if "OpenAI API key not found" in error_message:
-            raise HTTPException(
-                status_code=400, 
-                detail="OpenAI API key not configured. Please set the OPENAI_API_KEY environment variable."
-            )
-        elif "AWS credentials not found" in error_message:
-            raise HTTPException(
-                status_code=400,
-                detail="AWS credentials not configured. Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables."
-            )
-        elif "Unsupported LLM provider" in error_message:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid LLM provider. Please set LLM_PROVIDER to 'openai' or 'bedrock'."
-            )
-        else:
-            raise HTTPException(status_code=500, detail=f"Configuration error: {e}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate config: {e}")
+
+    return ConfigJobStatusResponse(**job_data)
 
 @app.post("/start", response_model=dict)
 async def start_generation(start_request: StartRequest, request: Request):
