@@ -212,7 +212,11 @@ async def generate_config(request: GenerateRequest):
     Generates a scenario configuration from a user description using an LLM.
     """
     try:
-        yaml_config_str = generate_config_from_description(request.description)
+        # Offload blocking LLM call to thread pool so the event loop stays responsive.
+        yaml_config_str = await asyncio.to_thread(
+            generate_config_from_description,
+            request.description,
+        )
         # Validate that the output is valid YAML
         config_dict = yaml.safe_load(yaml_config_str)
         return {"yaml": yaml_config_str, "config": config_dict}
@@ -838,9 +842,11 @@ async def generate_scenario(request: ScenarioGenerationRequest):
     Uses LLM to generate a scenario modification from natural language description.
     """
     try:
-        scenario_modification = generate_scenario_from_description(
+        # Scenario generation also calls the LLM synchronously, so run it in a worker thread.
+        scenario_modification = await asyncio.to_thread(
+            generate_scenario_from_description,
             request.description,
-            request.context
+            request.context,
         )
 
         return {
