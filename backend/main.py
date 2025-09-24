@@ -444,6 +444,48 @@ async def get_config_generation_job(job_id: str):
 
     return ConfigJobStatusResponse(**job_data)
 
+def clean_config_for_validation(config: dict) -> dict:
+    """
+    Clean and fix configuration before validation.
+    Removes incomplete log_samples and adds default telemetry section if missing.
+    """
+    import copy
+    cleaned_config = copy.deepcopy(config)  # Deep copy to avoid modifying original
+
+    # Clean up services
+    if "services" in cleaned_config:
+        for service in cleaned_config["services"]:
+            # Remove incomplete log_samples
+            if "log_samples" in service:
+                cleaned_samples = []
+                for sample in service["log_samples"]:
+                    # Check if it's a valid log sample with both level and message
+                    if (isinstance(sample, dict) and
+                        sample.get("level") and
+                        sample.get("message") and
+                        isinstance(sample.get("level"), str) and
+                        isinstance(sample.get("message"), str)):
+                        cleaned_samples.append({
+                            "level": sample["level"],
+                            "message": sample["message"]
+                        })
+                if cleaned_samples:
+                    service["log_samples"] = cleaned_samples
+                else:
+                    # Remove log_samples if all were invalid
+                    del service["log_samples"]
+
+    # Add default telemetry section if missing
+    if "telemetry" not in cleaned_config:
+        cleaned_config["telemetry"] = {
+            "trace_rate": 5,
+            "error_rate": 0.05,
+            "metrics_interval": 10,
+            "include_logs": True
+        }
+
+    return cleaned_config
+
 @app.post("/start", response_model=dict)
 async def start_generation(start_request: StartRequest, request: Request):
     """
@@ -452,14 +494,14 @@ async def start_generation(start_request: StartRequest, request: Request):
     try:
         # Get user from request headers
         user = get_user_from_request(request)
-        
+
         # Check system-wide active job limit
         if count_active_jobs() >= MAX_ACTIVE_JOBS:
             raise HTTPException(
-                status_code=429, 
+                status_code=429,
                 detail=f"Maximum active jobs limit reached ({MAX_ACTIVE_JOBS}). Please wait for some jobs to complete or stop existing jobs."
             )
-        
+
         # Check per-user active job limit
         user_active_jobs = count_user_jobs(user, "running")
         if user_active_jobs >= MAX_JOBS_PER_USER:
@@ -467,12 +509,13 @@ async def start_generation(start_request: StartRequest, request: Request):
                 status_code=429,
                 detail=f"Maximum jobs per user limit reached ({MAX_JOBS_PER_USER}). Please stop some of your existing jobs first."
             )
-        
+
         # Generate unique job ID
         job_id = str(uuid.uuid4())[:8]
-        
-        # Validate configuration
-        scenario_config = ScenarioConfig(**start_request.config)
+
+        # Clean and validate configuration
+        cleaned_config = clean_config_for_validation(start_request.config)
+        scenario_config = ScenarioConfig(**cleaned_config)
         
         # Create and start generator with failure callback
         def failure_callback(error_msg: str):
@@ -489,12 +532,12 @@ async def start_generation(start_request: StartRequest, request: Request):
         # Calculate timeout time
         timeout_at = datetime.now() + timedelta(hours=MAX_JOB_DURATION_HOURS)
         
-        # Store job info
+        # Store job info with cleaned config
         job_info = JobInfo(
             id=job_id,
             description=start_request.description,
             created_at=datetime.now(),
-            config=start_request.config,
+            config=cleaned_config,
             status="running",
             otlp_endpoint=start_request.otlp_endpoint,
             user=user,
@@ -656,12 +699,15 @@ async def restart_job(job_id: str, restart_request: Optional[RestartRequest] = N
         api_key_to_use = restart_request.api_key if restart_request and restart_request.api_key else None
         auth_type_to_use = restart_request.auth_type if restart_request and restart_request.auth_type else "ApiKey"
         description_to_use = restart_request.description if restart_request and restart_request.description else job_info.description
-        
+
+        # Clean and validate configuration
+        cleaned_config = clean_config_for_validation(config_to_use)
+
         # Create new generator with the config and failure callback
         def failure_callback(error_msg: str):
             handle_generator_failure(job_id, error_msg)
-        
-        scenario_config = ScenarioConfig(**config_to_use)
+
+        scenario_config = ScenarioConfig(**cleaned_config)
         generator = TelemetryGenerator(
             config=scenario_config,
             otlp_endpoint=otlp_endpoint_to_use,
@@ -671,7 +717,7 @@ async def restart_job(job_id: str, restart_request: Optional[RestartRequest] = N
         )
         
         # Update job info with new values - reset error state on restart
-        job_info.config = config_to_use
+        job_info.config = cleaned_config
         job_info.otlp_endpoint = otlp_endpoint_to_use
         job_info.description = description_to_use
         job_info.status = "running"
