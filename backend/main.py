@@ -190,8 +190,7 @@ def config_generation_worker():
                     job.yaml = last_yaml_output
                     job.last_yaml = last_yaml_output
 
-        finally:
-            config_job_queue.task_done()
+        config_job_queue.task_done()
 
 
 def start_config_generation_workers():
