@@ -86,7 +86,7 @@ def _call_bedrock(prompt: str) -> str:
     ]
     request_body = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 100000,
+        "max_tokens": 65536,
         "temperature": temperature,
         "system": SYSTEM_PROMPT,
         "messages": [
