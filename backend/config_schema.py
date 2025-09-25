@@ -7,7 +7,7 @@ class GenerateConfigRequest(BaseModel):
     prompt: str
 
 class StartDemoRequest(BaseModel):
-    yaml_config: str
+    config: Dict[str, Any]
     otlp_endpoint: str
     api_key: Optional[str] = None
     auth_type: str = Field(default="ApiKey", description="Authentication type: 'Bearer' or 'ApiKey'")
@@ -47,7 +47,7 @@ class Operation(BaseModel):
     latency: Optional[LatencyConfig] = None
     business_data: Optional[List[BusinessDataField]] = Field(default_factory=list, description="Business-relevant data fields to add to traces.")
 
-# --- Updated YAML Configuration Models ---
+# --- Updated Configuration Models ---
 
 class ServiceDependency(BaseModel):
     service: str

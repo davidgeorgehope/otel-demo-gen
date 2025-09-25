@@ -1,7 +1,6 @@
 fastapi
 uvicorn[standard]
 pydantic
-PyYAML
 httpx
 python-dotenv
 openai

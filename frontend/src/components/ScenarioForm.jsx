@@ -7,7 +7,7 @@ const ScenarioForm = ({
   setScenario,
   handleGenerateConfig,
   isLoading,
-  setYamlConfig,
+  setConfigJson,
   configJobId,
   configJobStatus
 }) => {
@@ -18,8 +18,12 @@ const ScenarioForm = ({
         throw new Error(`HTTP error! status: ${response.status}`)
       }
       const data = await response.json()
-      // Use the passed setYamlConfig function
-      setYamlConfig(data.yaml)
+      // Use the passed setter to hydrate the editor with example JSON
+      if (data.config_json) {
+        setConfigJson(data.config_json)
+      } else if (data.config) {
+        setConfigJson(JSON.stringify(data.config, null, 2))
+      }
       // Also set a default scenario description
       setScenario("Test scenario: 3-tier web application with TypeScript frontend, Java API gateway, and Python user service")
     } catch (error) {

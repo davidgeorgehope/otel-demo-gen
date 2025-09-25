@@ -1,11 +1,10 @@
-import yaml
 import uuid
 import re
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Response, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, List, Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 import os
 import asyncio
 import threading
@@ -76,7 +75,7 @@ class ConfigGenerationJob:
     id: str
     description: str
     status: Literal["pending", "running", "succeeded", "failed"] = "pending"
-    yaml: Optional[str] = None
+    config_json: Optional[str] = None
     config: Optional[dict] = None
     error_message: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
@@ -84,7 +83,7 @@ class ConfigGenerationJob:
     attempts: int = 0
     max_attempts: int = 1
     last_error: Optional[str] = None
-    last_yaml: Optional[str] = None
+    last_response: Optional[str] = None
     used_fallback: bool = False
 
 
@@ -96,10 +95,7 @@ config_worker_stop_event = threading.Event()
 
 
 def _generate_fallback_config(description: str) -> str:
-    """
-    Generate a simplified fallback configuration when LLM generation fails.
-    This creates a basic but valid config based on the user's description.
-    """
+    """Generate a simplified fallback JSON configuration when LLM generation fails."""
     # Extract some keywords from the description to customize the fallback
     lower_desc = description.lower()
 
@@ -127,9 +123,14 @@ def _generate_fallback_config(description: str) -> str:
                 "span_name": f"GET /api/v{i+1}",
             }],
             "log_samples": [
-                {"level": "INFO", "message": f"Service {i+1} started successfully"},
-                {"level": "INFO", "message": f"Processing request for operation {i+1}"},
-                {"level": "ERROR", "message": f"Service {i+1} encountered an error"},
+                {"level": "INFO", "message": f"service-{i+1} started successfully"},
+                {"level": "INFO", "message": f"service-{i+1} handling request {{request_id}}"},
+                {"level": "INFO", "message": f"operation{{operation_id}} completed in {{duration_ms}}ms"},
+                {"level": "INFO", "message": f"service-{i+1} fetched resource {{resource_id}}"},
+                {"level": "INFO", "message": f"service-{i+1} emitted event {{event_name}}"},
+                {"level": "INFO", "message": f"service-{i+1} cached value for key {{cache_key}}"},
+                {"level": "ERROR", "message": f"service-{i+1} timeout calling dependency after {{timeout_ms}}ms"},
+                {"level": "ERROR", "message": f"service-{i+1} failed to process {{payload_id}}: {{error_reason}}"},
             ]
         }
 
@@ -183,73 +184,58 @@ def _generate_fallback_config(description: str) -> str:
         }
     }
 
-    # Convert to YAML
-    return yaml.dump(config, default_flow_style=False, sort_keys=False)
+    # Convert to JSON for storage/display
+    return json.dumps(config, indent=2)
 
-def _sanitize_yaml_string(yaml_str: str) -> str:
-    """
-    Sanitize YAML string to fix common issues that cause parsing errors.
-    """
-    lines = yaml_str.split('\n')
-    fixed_lines = []
+def _extract_json_content(raw_text: str) -> str:
+    """Strip code fences and isolate the JSON object emitted by the LLM."""
+    if not raw_text:
+        return raw_text
 
-    for line in lines:
-        # Check if line contains a message field with potential quote issues
-        if 'message:' in line:
-            # Extract the message content
-            match = re.match(r'^(\s*-?\s*(?:level:\s*"\w+"\s+)?message:\s*)(.*)$', line)
-            if match:
-                prefix = match.group(1)
-                message_content = match.group(2).strip()
+    text = raw_text.strip()
 
-                # If the message starts and ends with quotes, check for internal issues
-                if message_content.startswith('"'):
-                    # Remove outer quotes
-                    if message_content.endswith('"'):
-                        inner_content = message_content[1:-1]
-                    else:
-                        # Unterminated quote - add closing quote
-                        inner_content = message_content[1:]
-                        message_content = f'"{inner_content}"'
+    # Remove Markdown code fences if present
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
 
-                    # Escape internal quotes and problematic characters
-                    inner_content = inner_content.replace('\\', '\\\\')
-                    inner_content = inner_content.replace('"', '\\"')
+    # Trim any leading language labels like `json` that may remain after fences
+    if text.lower().startswith("json\n"):
+        text = text[5:].lstrip()
 
-                    # Reconstruct the line
-                    line = f'{prefix}"{inner_content}"'
-                elif not message_content.startswith('"') and not message_content.startswith("'"):
-                    # Wrap unquoted strings that might have special characters
-                    if any(char in message_content for char in [':', '{', '}', '[', ']', ',', '&', '*', '#', '?', '|', '-', '<', '>', '=', '!', '%', '@', '`']):
-                        # Escape and quote
-                        escaped = message_content.replace('\\', '\\\\').replace('"', '\\"')
-                        line = f'{prefix}"{escaped}"'
+    # Attempt to isolate the JSON object/array boundaries
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1 and end >= start:
+        text = text[start:end + 1]
 
-        fixed_lines.append(line)
+    return text
 
-    return '\n'.join(fixed_lines)
-
-def _build_retry_prompt(description: str, last_error: Optional[str], previous_yaml: Optional[str]) -> str:
+def _build_retry_prompt(description: str, last_error: Optional[str], previous_output: Optional[str]) -> str:
     """Create a prompt that feeds the previous error/output back to the LLM."""
     guidance_parts = [
         description.strip(),
-        "\nThe previous YAML output failed to parse with the following error:",
+        "\nThe previous JSON output failed to parse with the following error:",
         last_error or "Unknown validation error.",
         "\nIMPORTANT: Please ensure all string values in log messages are properly quoted and escaped.",
         "\nSpecifically:",
-        "- Use double quotes for all message strings",
+        "- Emit valid JSON (double quotes, no trailing commas)",
         "- Escape any internal quotes with backslash (\\\")",
-        "- Ensure all quotes are properly closed",
-        "\nPlease regenerate a corrected configuration as valid YAML only (no code fences)."
+        "- Ensure arrays and objects are properly closed",
+        "\nPlease regenerate a corrected configuration as pure JSON (no code fences)."
     ]
 
-    if previous_yaml:
+    if previous_output:
         guidance_parts.extend([
-            "\nPrevious YAML output for reference:",
-            "```yaml",
-            previous_yaml.strip(),
+            "\nPrevious JSON output for reference:",
+            "```json",
+            previous_output.strip(),
             "```",
-            "\nCorrect the issues and ensure the YAML satisfies the previously provided requirements."
+            "\nCorrect the issues and ensure the JSON satisfies the previously provided requirements."
         ])
 
     return "\n".join(guidance_parts)
@@ -277,7 +263,7 @@ def config_generation_worker():
 
         success = False
         last_error: Optional[str] = None
-        last_yaml_output: Optional[str] = None
+        last_response: Optional[str] = None
 
         for attempt_index in range(job.max_attempts):
             with config_jobs_lock:
@@ -286,48 +272,53 @@ def config_generation_worker():
 
             prompt = job.description
             if attempt_index > 0:
-                prompt = _build_retry_prompt(job.description, last_error, last_yaml_output)
+                prompt = _build_retry_prompt(job.description, last_error, last_response)
 
             try:
-                yaml_config_str = generate_config_from_description(prompt)
-                cleaned_yaml = (yaml_config_str or "").strip()
-
-                # Apply sanitization to fix common YAML issues
-                sanitized_yaml = _sanitize_yaml_string(cleaned_yaml)
-                last_yaml_output = cleaned_yaml  # Store original for debugging
+                raw_config_str = generate_config_from_description(prompt) or ""
+                raw_config_str = raw_config_str.strip()
+                normalized_json = _extract_json_content(raw_config_str) or raw_config_str
+                last_response = raw_config_str  # Store original for debugging
 
                 try:
-                    # First try with sanitized version
-                    config_dict = yaml.safe_load(sanitized_yaml)
-                    cleaned_yaml = sanitized_yaml  # Use sanitized version if it works
-                except yaml.YAMLError:
-                    # If sanitization didn't help, try original
-                    config_dict = yaml.safe_load(cleaned_yaml)
+                    config_dict = json.loads(normalized_json)
+                except json.JSONDecodeError as decode_err:
+                    last_error = f"JSON decoding error: {decode_err}"
+                    with config_jobs_lock:
+                        job.last_error = last_error
+                        job.last_response = raw_config_str
+                        job.updated_at = datetime.utcnow()
+                    continue
+
+                try:
+                    scenario_model = ScenarioConfig(**config_dict)
+                    validated_config = scenario_model.model_dump()
+                except ValidationError as validation_err:
+                    last_error = f"Schema validation error: {validation_err}"
+                    with config_jobs_lock:
+                        job.last_error = last_error
+                        job.last_response = raw_config_str
+                        job.updated_at = datetime.utcnow()
+                    continue
+
+                pretty_json = json.dumps(validated_config, indent=2)
 
                 with config_jobs_lock:
-                    job.yaml = cleaned_yaml
-                    job.config = config_dict
+                    job.config_json = pretty_json
+                    job.config = validated_config
                     job.status = "succeeded"
                     job.error_message = None
                     job.last_error = None
-                    job.last_yaml = cleaned_yaml
+                    job.last_response = raw_config_str
                     job.updated_at = datetime.utcnow()
                 success = True
                 break
-
-            except yaml.YAMLError as err:
-                last_error = f"YAML parsing error: {err}"
-                with config_jobs_lock:
-                    job.last_error = last_error
-                    job.last_yaml = last_yaml_output
-                    job.updated_at = datetime.utcnow()
-                continue
 
             except Exception as err:
                 last_error = str(err)
                 with config_jobs_lock:
                     job.last_error = last_error
-                    job.last_yaml = last_yaml_output
+                    job.last_response = last_response
                     job.updated_at = datetime.utcnow()
                 break
 
@@ -335,16 +326,19 @@ def config_generation_worker():
             # Try generating a fallback config as a last resort
             try:
                 print(f"🔧 Generating fallback config for job {job_id} after {job.attempts} failed attempts")
-                fallback_yaml = _generate_fallback_config(job.description)
-                fallback_config = yaml.safe_load(fallback_yaml)
+                fallback_json = _generate_fallback_config(job.description)
+                fallback_config = json.loads(fallback_json)
+                fallback_model = ScenarioConfig(**fallback_config)
+                fallback_config = fallback_model.model_dump()
+                fallback_json = json.dumps(fallback_config, indent=2)
 
                 with config_jobs_lock:
-                    job.yaml = fallback_yaml
+                    job.config_json = fallback_json
                     job.config = fallback_config
                     job.status = "succeeded"
                     job.error_message = f"Generated fallback config after LLM failures. Original error: {last_error}"
                     job.last_error = None
-                    job.last_yaml = fallback_yaml
+                    job.last_response = fallback_json
                     job.updated_at = datetime.utcnow()
                     job.used_fallback = True
 
@@ -356,9 +350,9 @@ def config_generation_worker():
                     job.status = "failed"
                     job.error_message = f"LLM error: {last_error}. Fallback error: {str(fallback_err)}"
                     job.updated_at = datetime.utcnow()
-                    if last_yaml_output:
-                        job.yaml = last_yaml_output
-                        job.last_yaml = last_yaml_output
+                    if last_response:
+                        job.config_json = last_response
+                        job.last_response = last_response
 
         config_job_queue.task_done()
 
@@ -553,7 +547,7 @@ class GenerateConfigJobResponse(BaseModel):
 class ConfigJobStatusResponse(BaseModel):
     job_id: str
     status: Literal["pending", "running", "succeeded", "failed"]
-    yaml: Optional[str] = None
+    config_json: Optional[str] = None
     config: Optional[dict] = None
     error_message: Optional[str] = None
     created_at: datetime
@@ -602,7 +596,7 @@ async def get_config_generation_job(job_id: str):
         job_data = dict(
             job_id=job.id,
             status=job.status,
-            yaml=job.yaml,
+            config_json=job.config_json,
             config=job.config,
             error_message=job.error_message,
             created_at=job.created_at,
@@ -1032,11 +1026,10 @@ async def get_test_config():
         }
     }
     
-    # Convert to YAML string for consistency with generate-config endpoint
-    import yaml
-    yaml_config_str = yaml.dump(test_config, default_flow_style=False)
-    
-    return {"yaml": yaml_config_str, "config": test_config}
+    # Convert to JSON string for consistency with generate-config endpoint
+    config_json_str = json.dumps(test_config, indent=2)
+
+    return {"config_json": config_json_str, "config": test_config}
 
 @app.get("/llm-config", response_model=dict)
 async def get_llm_config():

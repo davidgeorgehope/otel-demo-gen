@@ -95,7 +95,7 @@ User Input (Natural Language)
     ↓ 
 LLM (OpenAI/Bedrock) 
     ↓ 
-YAML Configuration 
+JSON Configuration 
     ↓ 
 Telemetry Generation Engine 
     ↓ 
@@ -114,32 +114,48 @@ Observability Backend
 
 ## 📊 Configuration Schema
 
-```yaml
-services:
-  - name: payment-service
-    language: java
-    role: backend
-    operations:
-      - name: "ProcessPayment"
-        span_name: "POST /payments"
-        business_data:
-          - name: "amount"
-            type: "number"
-            min_value: 1.00
-            max_value: 999.99
-    depends_on:
-      - db: postgres-main
-      - service: fraud-service
-        protocol: http
-
-databases:
-  - name: postgres-main
-    type: postgres
-
-telemetry:
-  trace_rate: 5
-  error_rate: 0.05
-  include_logs: true
+```json
+{
+  "services": [
+    {
+      "name": "payment-service",
+      "language": "java",
+      "role": "backend",
+      "operations": [
+        {
+          "name": "ProcessPayment",
+          "span_name": "POST /payments",
+          "business_data": [
+            {"name": "amount", "type": "number", "min_value": 1.0, "max_value": 999.99},
+            {"name": "payment_method", "type": "enum", "values": ["card", "bank_transfer", "paypal"]}
+          ]
+        }
+      ],
+      "log_samples": [
+        {"level": "INFO", "message": "Payment {payment_id} authorized for ${amount}"},
+        {"level": "INFO", "message": "Fraud check completed for {payment_id} in {duration_ms}ms"},
+        {"level": "INFO", "message": "Forwarded settlement request for {payment_id}"},
+        {"level": "INFO", "message": "Updated balance for merchant {merchant_id} by ${amount}"},
+        {"level": "INFO", "message": "Captured funds for payment {payment_id}"},
+        {"level": "INFO", "message": "Sent receipt email to {user_email}"},
+        {"level": "ERROR", "message": "Payment {payment_id} failed: {error_reason}"},
+        {"level": "ERROR", "message": "Timeout contacting payment network for {payment_id} after {timeout_ms}ms"}
+      ],
+      "depends_on": [
+        {"db": "postgres-main"},
+        {"service": "fraud-service", "protocol": "http"}
+      ]
+    }
+  ],
+  "databases": [
+    {"name": "postgres-main", "type": "postgres"}
+  ],
+  "telemetry": {
+    "trace_rate": 5,
+    "error_rate": 0.05,
+    "include_logs": true
+  }
+}
 ```
 
 ## 🐳 Deployment

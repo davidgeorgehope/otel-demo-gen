@@ -6,7 +6,6 @@ import os
 import requests
 import json
 import httpx
-import yaml
 import uuid
 from typing import Dict, List, Any, Tuple, Union, Optional
 from datetime import datetime, timezone
@@ -1279,26 +1278,29 @@ class TelemetryGenerator:
 
 def main_test():
     """Example usage for standalone testing of the generator."""
-    yaml_content = """
-services:
-  - name: frontend
-    language: javascript
-    depends_on: []
-telemetry:
-  trace_rate: 1
-  error_rate: 0.1
-  metrics_interval: 5
-  include_logs: true
-"""
+    sample_config = {
+        "services": [
+            {
+                "name": "frontend",
+                "language": "javascript",
+                "depends_on": []
+            }
+        ],
+        "telemetry": {
+            "trace_rate": 1,
+            "error_rate": 0.1,
+            "metrics_interval": 5,
+            "include_logs": True
+        }
+    }
     generator = None
     try:
-        config_data = yaml.safe_load(yaml_content)
-        scenario_config = ScenarioConfig(**config_data)
+        scenario_config = ScenarioConfig(**sample_config)
         generator = TelemetryGenerator(config=scenario_config, otlp_endpoint="http://localhost:4318")
         generator.start()
         print("Generator started for testing. Running for 15 seconds.")
         time.sleep(15)
-    except (yaml.YAMLError, Exception) as e:
+    except Exception as e:
         print(f"Error during testing setup: {e}")
     finally:
         if generator:
@@ -1307,32 +1309,38 @@ telemetry:
 def test_k8s_log_generation():
     """Tests the generation of K8s logs payload by printing it."""
     print("\n--- Running K8s Log Generation Test ---")
-    yaml_content = """
-services:
-  - name: api-gateway
-    language: go
-    role: frontend
-    depends_on:
-      - service: orders-service
-        protocol: grpc
-  - name: orders-service
-    language: java
-    role: backend
-    depends_on:
-      - db: orders-db
-databases:
-  - name: orders-db
-    type: postgres
-telemetry:
-  trace_rate: 1
-  error_rate: 0
-  metrics_interval: 10
-  include_logs: true
-"""
+    sample_config = {
+        "services": [
+            {
+                "name": "api-gateway",
+                "language": "go",
+                "role": "frontend",
+                "depends_on": [
+                    {"service": "orders-service", "protocol": "grpc"}
+                ]
+            },
+            {
+                "name": "orders-service",
+                "language": "java",
+                "role": "backend",
+                "depends_on": [
+                    {"db": "orders-db"}
+                ]
+            }
+        ],
+        "databases": [
+            {"name": "orders-db", "type": "postgres"}
+        ],
+        "telemetry": {
+            "trace_rate": 1,
+            "error_rate": 0,
+            "metrics_interval": 10,
+            "include_logs": True
+        }
+    }
     generator = None
     try:
-        config_data = yaml.safe_load(yaml_content)
-        scenario_config = ScenarioConfig(**config_data)
+        scenario_config = ScenarioConfig(**sample_config)
         # OTLP endpoint can be None for a dry run
         generator = TelemetryGenerator(config=scenario_config, otlp_endpoint=None)
         
@@ -1345,7 +1353,7 @@ telemetry:
         else:
             print("K8s logs payload generation did not produce output.")
 
-    except (yaml.YAMLError, Exception) as e:
+    except Exception as e:
         print(f"Error during K8s log generation test: {e}")
     finally:
         if generator and generator.is_running():

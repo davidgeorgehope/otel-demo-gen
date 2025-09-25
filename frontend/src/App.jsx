@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react'
-import yaml from 'js-yaml'
 import Header from './components/Header'
 import ScenarioForm from './components/ScenarioForm'
 import ConfigDisplay from './components/ConfigDisplay'
@@ -11,7 +10,7 @@ import { api } from './utils/api'
 
 function App() {
   const [scenario, setScenario] = useState('')
-  const [yamlConfig, setYamlConfig] = useState('')
+  const [configJson, setConfigJson] = useState('')
   const [otlpEndpoint, setOtlpEndpoint] = useState('http://localhost:4318')
   const [apiKey, setApiKey] = useState('')
   const [authType, setAuthType] = useState('ApiKey')
@@ -32,6 +31,9 @@ function App() {
       const statusData = await api.get('/status')
       setIsDemoRunning(statusData.running)
       setCurrentJobId(statusData.job_id)
+      if (statusData.config) {
+        setConfigJson(JSON.stringify(statusData.config, null, 2))
+      }
       
       // If we have a job ID, get detailed job info for error handling
       if (statusData.job_id) {
@@ -77,7 +79,11 @@ function App() {
         setConfigJobStatus(status.status)
 
         if (status.status === 'succeeded') {
-          setYamlConfig(status.yaml || '')
+          if (status.config_json) {
+            setConfigJson(status.config_json)
+          } else if (status.config) {
+            setConfigJson(JSON.stringify(status.config, null, 2))
+          }
           setError('')
           setIsLoading(false)
           activeConfigJobRef.current = null
@@ -115,7 +121,7 @@ function App() {
 
   const handleGenerateConfig = async () => {
     setIsLoading(true)
-    setYamlConfig('')
+    setConfigJson('')
     setError('')
     setConfigJobStatus('pending')
     setConfigJobId(null)
@@ -139,9 +145,20 @@ function App() {
   const handleStartDemo = async () => {
     setError('')
     try {
+      let parsedConfig = {}
+      if (configJson) {
+        try {
+          parsedConfig = JSON.parse(configJson)
+        } catch (parseError) {
+          console.error('Invalid JSON config supplied:', parseError)
+          setError('Configuration JSON is invalid. Please fix formatting or regenerate.')
+          return
+        }
+      }
+
       // Always create a new job - support multiple concurrent jobs
       const data = await api.post('/start', {
-        config: yamlConfig ? JSON.parse(JSON.stringify(yaml.load(yamlConfig))) : {},
+        config: parsedConfig,
         description: scenario || 'Telemetry Generation Job',
         otlp_endpoint: otlpEndpoint,
         api_key: apiKey,
@@ -188,11 +205,11 @@ function App() {
             setScenario={setScenario}
             handleGenerateConfig={handleGenerateConfig}
             isLoading={isLoading}
-            setYamlConfig={setYamlConfig}
+            setConfigJson={setConfigJson}
             configJobId={configJobId}
             configJobStatus={configJobStatus}
           />
-          {yamlConfig && (
+          {configJson && (
              <Controls
               otlpEndpoint={otlpEndpoint}
               setOtlpEndpoint={setOtlpEndpoint}
@@ -208,7 +225,7 @@ function App() {
           )}
         </div>
         <div>
-          <ConfigDisplay yamlConfig={yamlConfig} />
+          <ConfigDisplay configJson={configJson} />
         </div>
       </main>
     )

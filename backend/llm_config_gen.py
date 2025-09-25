@@ -3,6 +3,8 @@ import json
 from openai import OpenAI
 import boto3
 from dotenv import load_dotenv
+from typing import Any
+
 
 load_dotenv()
 
@@ -56,6 +58,8 @@ def _call_openai(prompt: str) -> str:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
+        temperature=float(os.getenv("OPENAI_TEMPERATURE", "0")),
+        response_format={"type": "json_object"},
     )
     return completion.choices[0].message.content
 
@@ -63,21 +67,30 @@ def _call_bedrock(prompt: str) -> str:
     """Call Amazon Bedrock Claude API."""
     client = _get_bedrock_client()
     model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-sonnet-4-20250514-v1:0")
-    
-    # Format the prompt for Claude
-    formatted_prompt = f"Human: {SYSTEM_PROMPT}\n\n{prompt}\n\nAssistant:"
-    
-    # Prepare the request body for Claude
+    temperature = float(os.getenv("BEDROCK_TEMPERATURE", "0"))
+
+    tools = [
+        {
+            "name": "emit_config",
+            "description": "Return a JSON object that matches the observability scenario schema.",
+            "input_schema": SCENARIO_RESPONSE_SCHEMA,
+        }
+    ]
     request_body = {
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 4000,
-        "temperature": 0.1,
+        "temperature": temperature,
+        "system": SYSTEM_PROMPT,
         "messages": [
             {
-                "role": "user", 
-                "content": [{"type": "text", "text": f"{SYSTEM_PROMPT}\n\n{prompt}"}]
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt}
+                ]
             }
-        ]
+        ],
+        "tools": tools,
+        "tool_choice": {"type": "tool", "name": "emit_config"}
     }
     
     try:
@@ -89,177 +102,179 @@ def _call_bedrock(prompt: str) -> str:
         
         # Parse response
         response_body = json.loads(response['body'].read())
-        return response_body['content'][0]['text']
+        content_blocks = response_body.get('content', [])
+
+        for block in content_blocks:
+            if block.get('type') == 'tool_use' and block.get('name') == 'emit_config':
+                return json.dumps(block.get('input', {}))
+            if block.get('type') == 'text':
+                return block.get('text', '')
+
+        # Fallback to serialized response if no tool output present
+        return json.dumps(response_body)
         
     except Exception as e:
         print(f"Error calling Bedrock API: {e}")
         raise
 
-SYSTEM_PROMPT = """
+SCENARIO_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["services", "telemetry"],
+    "properties": {
+        "services": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "required": ["name", "language", "log_samples"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "language": {"type": "string"},
+                    "role": {"type": "string"},
+                    "depends_on": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "service": {"type": "string"},
+                                "db": {"type": "string"},
+                                "cache": {"type": "string"},
+                                "queue": {"type": "string"},
+                                "protocol": {"type": "string"},
+                                "via": {"type": "string"},
+                                "example_queries": {"type": "array", "items": {"type": "string"}},
+                                "latency": {
+                                    "type": "object",
+                                    "properties": {
+                                        "min_ms": {"type": "integer"},
+                                        "max_ms": {"type": "integer"},
+                                        "probability": {"type": "number"}
+                                    },
+                                    "required": ["min_ms", "max_ms"]
+                                }
+                            },
+                            "additionalProperties": False,
+                            "minProperties": 1
+                        }
+                    },
+                    "operations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["name", "span_name"],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "span_name": {"type": "string"},
+                                "description": {"type": "string"},
+                                "db_queries": {"type": "array", "items": {"type": "string"}},
+                                "latency": {
+                                    "type": "object",
+                                    "properties": {
+                                        "min_ms": {"type": "integer"},
+                                        "max_ms": {"type": "integer"},
+                                        "probability": {"type": "number"}
+                                    },
+                                    "required": ["min_ms", "max_ms"]
+                                },
+                                "business_data": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "required": ["name", "type"],
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "type": {"type": "string", "enum": ["string", "number", "integer", "boolean", "enum"]},
+                                            "pattern": {"type": "string"},
+                                            "min_value": {"type": "number"},
+                                            "max_value": {"type": "number"},
+                                            "values": {"type": "array", "items": {"type": "string"}},
+                                            "description": {"type": "string"}
+                                        },
+                                        "additionalProperties": False
+                                    }
+                                }
+                            },
+                            "additionalProperties": False
+                        }
+                    },
+                    "log_samples": {
+                        "type": "array",
+                        "minItems": 8,
+                        "maxItems": 10,
+                        "items": {
+                            "type": "object",
+                            "required": ["level", "message"],
+                            "properties": {
+                                "level": {"type": "string", "enum": ["INFO", "WARN", "ERROR", "DEBUG"]},
+                                "message": {"type": "string"},
+                                "context": {"type": "object"}
+                            },
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "additionalProperties": False
+            }
+        },
+        "databases": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "type"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {"type": "string"}
+                },
+                "additionalProperties": False
+            }
+        },
+        "message_queues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "type"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {"type": "string"}
+                },
+                "additionalProperties": False
+            }
+        },
+        "telemetry": {
+            "type": "object",
+            "required": ["trace_rate", "error_rate", "metrics_interval", "include_logs"],
+            "properties": {
+                "trace_rate": {"type": "integer"},
+                "error_rate": {"type": "number"},
+                "metrics_interval": {"type": "integer"},
+                "include_logs": {"type": "boolean"}
+            },
+            "additionalProperties": False
+        }
+    },
+    "additionalProperties": False
+}
+
+SCENARIO_SCHEMA_TEXT = json.dumps(SCENARIO_RESPONSE_SCHEMA, indent=2)
+
+SYSTEM_PROMPT = f"""
 You are an expert assistant that generates architecture configuration files for a microservices observability demo tool.
-The user will describe a scenario, and you will produce a YAML configuration representing it.
+Produce a JSON object that satisfies the scenario description and the schema below.
 
-**Requirements:**
+REQUIREMENTS
+1. Output only valid JSON (no code fences or commentary) that conforms to the schema.
+2. Populate 8-10 log_samples per service with 6-8 INFO entries and 2 ERROR entries, using realistic placeholders like {{user_id}}, {{order_id}}, {{duration_ms}}.
+3. Provide coherent dependencies (frontends -> backends -> data stores) and vary language assignments for services.
+4. Use dependency keys exactly as specified (service, db, cache, queue).
+5. Keep latency objects well-formed and ensure probability defaults to 1.0 if omitted.
+6. Prefer detailed business_data definitions that match the service domain.
 
-1.  **Output only YAML code.** Do not include any explanatory text.
-2.  Use the following top-level keys: `services`, `databases`, `message_queues`, `telemetry`.
-3.  For each service, you can optionally define a list of **`operations`** to simulate realistic business transactions.
-    *   An `operation` should have a `name` (e.g., "GetUserProfile"), a `span_name` (e.g., "GET /users/{id}"), and can include a list of `db_queries`.
-    *   To simulate performance issues, you can add a **`latency`** block to operations or dependencies. For example, to make a reporting operation slow, add `latency: {min_ms: 800, max_ms: 1500}`.
-    *   To simulate intermittent slowness on a dependency, add a `latency` block with a `probability` less than 1.0 (e.g., `probability: 0.1` for 10% of the time).
-    *   **NEW:** Add **`business_data`** to operations to include realistic business-relevant data in traces. This makes demos much more realistic by adding fields like shopping cart amounts, user IDs, product counts, etc.
-3.5 **CRITICAL:** For each service, you MUST include **`log_samples`** - an array of 8-10 realistic log messages that the service would generate.
-    *   Include 6-8 INFO level logs for normal operations
-    *   Include 2 ERROR level logs for failure scenarios
-    *   Use realistic message templates with placeholders like {user_id}, {order_id}, {duration_ms}
-    *   Make logs contextually relevant to the service's business purpose
-4.  For database dependencies, you can add a list of **`example_queries`** that are realistic for the specified database type (e.g., SQL for Postgres, JSON for MongoDB).
-5.  Create plausible dependencies: frontends call backends, backends use databases. Ensure the generated scenario is coherent.
-6.  Assign a variety of languages to the services to showcase a polyglot environment.
-7.  Maintain valid YAML syntax. Do not include any narrative or explanation, only the YAML code.
-
-**CRITICAL: Dependency Field Names**
-When defining service dependencies in the `depends_on` list, use these EXACT field names:
-- **Service dependency**: `service: "service-name"`
-- **Database dependency**: `db: "database-name"`  
-- **Cache dependency**: `cache: "cache-name"`
-- **Message queue dependency**: `queue: "queue-name"` (NOT "message_queue")
-
-**Business Data Configuration:**
-- **`type`**: "string", "number", "integer", "boolean", or "enum"
-- **For strings**: Use `pattern` with placeholders like `user_{random}`, `order_{uuid}`, `session_{random_string}`
-- **For numbers**: Use `min_value` and `max_value` (e.g., cart amounts, prices)
-- **For integers**: Use `min_value` and `max_value` (e.g., quantity, counts)
-- **For enums**: Use `values` list (e.g., payment methods, status values)
-- **For booleans**: No additional config needed
-
-**Example User Request:** "An e-commerce app with microservices, databases, cache, and message queues."
-
-**Example Output:**
-```yaml
-services:
-  - name: order-service
-    language: java
-    operations:
-      - name: "ProcessOrder"
-        span_name: "POST /orders"
-        db_queries:
-          - "INSERT INTO orders (id, user_id, status, total_amount) VALUES (?, ?, ?, ?)"
-        business_data:
-          - name: "user_id"
-            type: "string"
-            pattern: "user_{random}"
-          - name: "order_total"
-            type: "number"
-            min_value: 10.99
-    log_samples:
-      - level: "INFO"
-        message: "Order {order_id} created successfully for user {user_id} with total ${order_total}"
-      - level: "INFO"
-        message: "Processing payment for order {order_id} via {payment_method}"
-      - level: "INFO"
-        message: "Inventory reserved for order {order_id}: {item_count} items"
-      - level: "INFO"
-        message: "Order {order_id} validation completed in {duration_ms}ms"
-      - level: "INFO"
-        message: "Shipping calculation completed for order {order_id} to {region}"
-      - level: "WARN"
-        message: "Low inventory warning for product {product_id} in order {order_id}"
-      - level: "ERROR"
-        message: "Payment processing failed for order {order_id}: {error_reason}"
-      - level: "ERROR"
-        message: "Database timeout while processing order {order_id} after {timeout_ms}ms"
-            max_value: 599.99
-          - name: "item_count"
-            type: "integer"
-            min_value: 1
-            max_value: 15
-          - name: "payment_method"
-            type: "enum"
-            values: ["credit_card", "paypal", "bank_transfer", "apple_pay"]
-    depends_on:
-      - db: postgres-db
-        example_queries:
-          - "SELECT * FROM orders WHERE id = ?"
-          - "INSERT INTO orders (id, user_id, status) VALUES (?, ?, ?)"
-        latency:
-          min_ms: 150
-          max_ms: 300
-          probability: 0.05 # 5% of queries are slow
-      - cache: redis-cache
-      - queue: kafka-events
-  - name: notification-service
-    language: python
-    operations:
-      - name: "SendOrderConfirmation"
-        span_name: "CONSUME kafka-events"
-        business_data:
-          - name: "notification_type"
-            type: "enum"
-            values: ["email", "sms", "push"]
-          - name: "delivery_success"
-            type: "boolean"
-    depends_on:
-      - queue: kafka-events
-      - service: email-service
-        protocol: http
-        latency:
-          min_ms: 50
-          max_ms: 200
-  - name: reporting-service
-    language: python
-    operations:
-      - name: "GenerateWeeklySalesReport"
-        span_name: "GET /reports/sales/weekly"
-        db_queries:
-          - "SELECT p.category, SUM(oi.quantity * p.price) as total_sales FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_date > ? GROUP BY p.category ORDER BY total_sales DESC"
-        business_data:
-          - name: "report_period"
-            type: "string"
-            pattern: "week_{random}"
-          - name: "total_revenue"
-            type: "number"
-            min_value: 1000.0
-            max_value: 50000.0
-          - name: "is_scheduled"
-            type: "boolean"
-        latency:
-          min_ms: 1200
-          max_ms: 3500
-    depends_on:
-      - db: postgres-db
-      - cache: redis-cache
-
-databases:
-  - name: postgres-db
-    type: postgres
-
-message_queues:
-  - name: kafka-events
-    type: kafka
-
-telemetry:
-  trace_rate: 2
-  error_rate: 0.05
-  metrics_interval: 10
-  include_logs: true
-```
+EXPECTED JSON SCHEMA:
+{SCENARIO_SCHEMA_TEXT}
 """
 
 def generate_config_from_description(description: str) -> str:
-    """
-    Generates a YAML configuration from a natural language description using an LLM.
-
-    Args:
-        description: The user's description of the desired scenario.
-
-    Returns:
-        A string containing the generated YAML configuration.
-    
-    Raises:
-        ValueError: If LLM provider is not configured properly.
-        Exception: If the LLM API call fails.
-    """
+    """Generate a JSON configuration from a natural language description using an LLM."""
     try:
         provider = _get_llm_provider()
         
@@ -270,8 +285,8 @@ def generate_config_from_description(description: str) -> str:
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}. Use 'openai' or 'bedrock'.")
         
-        # The LLM sometimes wraps the output in ```yaml ... ```, so we strip that.
-        if response_content.startswith("```yaml"):
+        # The LLM sometimes wraps the output in ```json ... ```, so we strip that.
+        if response_content.startswith("```json"):
             response_content = response_content[7:]
         elif response_content.startswith("```"):
             response_content = response_content[3:]
@@ -291,8 +306,8 @@ if __name__ == '__main__':
     # Example usage for testing
     user_description = "A financial services app with 5 microservices, a Postgres database, a Redis cache, and a Kafka queue for notifications."
     try:
-        generated_yaml = generate_config_from_description(user_description)
-        print("--- Generated YAML Config ---")
-        print(generated_yaml)
+        generated_json = generate_config_from_description(user_description)
+        print("--- Generated JSON Config ---")
+        print(generated_json)
     except Exception as e:
         print(f"Failed to generate config: {e}") 
