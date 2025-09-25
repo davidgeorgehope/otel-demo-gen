@@ -4,6 +4,7 @@ import json
 from typing import Any, List, Optional
 
 import boto3
+from botocore.config import Config
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
@@ -35,7 +36,8 @@ def _get_bedrock_client():
             service_name='bedrock-runtime',
             aws_access_key_id=aws_access_key,
             aws_secret_access_key=aws_secret_key,
-            region_name=aws_region
+            region_name=aws_region,
+            config=Config(read_timeout=300)
         )
     return bedrock_client
 
