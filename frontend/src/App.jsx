@@ -37,7 +37,11 @@ function App() {
       const statusData = await api.get('/status')
       setIsDemoRunning(statusData.running)
       setCurrentJobId(statusData.job_id)
-      if (statusData.running && statusData.config) {
+      const allowStatusConfigSync =
+        !activeConfigJobRef.current &&
+        (configSourceRef.current === 'status' || configSourceRef.current === 'none')
+
+      if (statusData.running && statusData.config && allowStatusConfigSync) {
         updateConfigJson(JSON.stringify(statusData.config, null, 2), 'status')
       } else if (!statusData.running && configSourceRef.current === 'status') {
         updateConfigJson('', 'none')
