@@ -1,7 +1,7 @@
 import logging
 import os
 import json
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import boto3
 from dotenv import load_dotenv
@@ -38,6 +38,38 @@ def _get_bedrock_client():
             region_name=aws_region
         )
     return bedrock_client
+
+def _select_content_from_blocks(content_blocks: List[dict[str, Any]]) -> tuple[Optional[str], bool]:
+    """Pick the best content emitted by the model along with empty-tool flag."""
+    selected_text: Optional[str] = None
+    empty_tool = False
+
+    for block in content_blocks or []:
+        block_type = block.get("type")
+
+        if block_type == "tool_use" and block.get("name") == "emit_config":
+            input_payload = block.get("input")
+
+            if isinstance(input_payload, (dict, list)):
+                if input_payload:
+                    return json.dumps(input_payload), empty_tool
+                empty_tool = True
+                continue
+
+            if isinstance(input_payload, str):
+                stripped = input_payload.strip()
+                if stripped:
+                    return stripped, empty_tool
+                empty_tool = True
+                continue
+
+        if block_type == "text":
+            text_value = block.get("text")
+            if text_value and text_value.strip():
+                selected_text = text_value.strip()
+
+    return selected_text, empty_tool
+
 
 def _call_bedrock(prompt: str) -> str:
     """Call Amazon Bedrock Claude API."""
@@ -79,13 +111,15 @@ def _call_bedrock(prompt: str) -> str:
         response_body = json.loads(response["body"].read())
         content_blocks = response_body.get("content", [])
 
-        for block in content_blocks:
-            if block.get("type") == "tool_use" and block.get("name") == "emit_config":
-                return json.dumps(block.get("input", {}))
-            if block.get("type") == "text" and block.get("text"):
-                return block["text"]
+        selected_content, saw_empty_tool = _select_content_from_blocks(content_blocks)
 
-        # Fallback to serialized response if no tool output present
+        if selected_content:
+            return selected_content
+
+        if saw_empty_tool:
+            logger.warning("Bedrock emit_config tool returned empty payload; falling back to raw response")
+
+        # Fallback to serialized response if no usable content present
         return json.dumps(response_body)
 
     except Exception:
