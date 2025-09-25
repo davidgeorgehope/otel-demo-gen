@@ -1169,15 +1169,16 @@ class TelemetryGenerator:
             'net.peer.name': dep.service,
             'user_agent.original': f"otel-demo-generator/{service.language}"
         }
-        protocol = dep.protocol or 'http'
+        protocol = (dep.protocol or 'http').lower()
 
-        if protocol == 'http':
+        if protocol in ('http', 'https'):
             method = secrets.choice(['GET', 'POST', 'PUT', 'DELETE'])
             path = f"/{service.name.lower()}/{secrets.token_hex(4)}"
             attributes['http.request.method'] = method
             attributes['http.response.status_code'] = 200 # default, will be overwritten on error
             attributes['url.path'] = path
-            attributes['url.full'] = f"http://{dep.service}{path}"
+            scheme = 'https' if protocol == 'https' else 'http'
+            attributes['url.full'] = f"{scheme}://{dep.service}{path}"
             attributes['server.address'] = dep.service
             span_name = f"HTTP {method}"
         elif protocol == 'grpc':

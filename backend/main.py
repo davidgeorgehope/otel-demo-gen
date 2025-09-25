@@ -84,7 +84,6 @@ class ConfigGenerationJob:
     max_attempts: int = 1
     last_error: Optional[str] = None
     last_response: Optional[str] = None
-    used_fallback: bool = False
 
 
 config_jobs: Dict[str, ConfigGenerationJob] = {}
@@ -92,100 +91,6 @@ config_jobs_lock = threading.Lock()
 config_job_queue: queue.Queue = queue.Queue()
 config_worker_threads: List[threading.Thread] = []
 config_worker_stop_event = threading.Event()
-
-
-def _generate_fallback_config(description: str) -> str:
-    """Generate a simplified fallback JSON configuration when LLM generation fails."""
-    # Extract some keywords from the description to customize the fallback
-    lower_desc = description.lower()
-
-    # Determine service count (default to 3)
-    service_count = 3
-    if "5" in description or "five" in lower_desc:
-        service_count = 5
-    elif "4" in description or "four" in lower_desc:
-        service_count = 4
-    elif "2" in description or "two" in lower_desc:
-        service_count = 2
-    elif "10" in description or "ten" in lower_desc:
-        service_count = 10
-
-    # Create basic services
-    services = []
-    languages = ["python", "nodejs", "java", "go", "ruby"]
-
-    for i in range(service_count):
-        service = {
-            "name": f"service-{i+1}",
-            "language": languages[i % len(languages)],
-            "operations": [{
-                "name": f"Operation{i+1}",
-                "span_name": f"GET /api/v{i+1}",
-            }],
-            "log_samples": [
-                {"level": "INFO", "message": f"service-{i+1} started successfully"},
-                {"level": "INFO", "message": f"service-{i+1} handling request {{request_id}}"},
-                {"level": "INFO", "message": f"operation{{operation_id}} completed in {{duration_ms}}ms"},
-                {"level": "INFO", "message": f"service-{i+1} fetched resource {{resource_id}}"},
-                {"level": "INFO", "message": f"service-{i+1} emitted event {{event_name}}"},
-                {"level": "INFO", "message": f"service-{i+1} cached value for key {{cache_key}}"},
-                {"level": "ERROR", "message": f"service-{i+1} timeout calling dependency after {{timeout_ms}}ms"},
-                {"level": "ERROR", "message": f"service-{i+1} failed to process {{payload_id}}: {{error_reason}}"},
-            ]
-        }
-
-        # Add dependencies for services after the first
-        if i > 0:
-            service["depends_on"] = [{"service": f"service-{i}"}]
-
-        services.append(service)
-
-    # Basic database if mentioned
-    databases = []
-    if "database" in lower_desc or "postgres" in lower_desc or "mysql" in lower_desc or "mongodb" in lower_desc:
-        db_type = "postgres"
-        if "mysql" in lower_desc:
-            db_type = "mysql"
-        elif "mongodb" in lower_desc or "mongo" in lower_desc:
-            db_type = "mongodb"
-
-        databases.append({
-            "name": f"{db_type}-main",
-            "type": db_type
-        })
-
-        # Add DB dependency to last service
-        if services:
-            services[-1].setdefault("depends_on", []).append({"db": f"{db_type}-main"})
-
-    # Basic message queue if mentioned
-    message_queues = []
-    if "queue" in lower_desc or "kafka" in lower_desc or "rabbitmq" in lower_desc:
-        queue_type = "kafka" if "kafka" in lower_desc else "rabbitmq"
-        message_queues.append({
-            "name": f"{queue_type}-events",
-            "type": queue_type
-        })
-
-        # Add queue dependency to last service
-        if services:
-            services[-1].setdefault("depends_on", []).append({"queue": f"{queue_type}-events"})
-
-    # Build the config
-    config = {
-        "services": services,
-        "databases": databases,
-        "message_queues": message_queues,
-        "telemetry": {
-            "trace_rate": 2,
-            "error_rate": 0.05,
-            "metrics_interval": 10,
-            "include_logs": True
-        }
-    }
-
-    # Convert to JSON for storage/display
-    return json.dumps(config, indent=2)
 
 def _extract_json_content(raw_text: str) -> str:
     """Strip code fences and isolate the JSON object emitted by the LLM."""
@@ -323,36 +228,18 @@ def config_generation_worker():
                 break
 
         if not success:
-            # Try generating a fallback config as a last resort
-            try:
-                print(f"🔧 Generating fallback config for job {job_id} after {job.attempts} failed attempts")
-                fallback_json = _generate_fallback_config(job.description)
-                fallback_config = json.loads(fallback_json)
-                fallback_model = ScenarioConfig(**fallback_config)
-                fallback_config = fallback_model.model_dump()
-                fallback_json = json.dumps(fallback_config, indent=2)
-
-                with config_jobs_lock:
-                    job.config_json = fallback_json
-                    job.config = fallback_config
-                    job.status = "succeeded"
-                    job.error_message = f"Generated fallback config after LLM failures. Original error: {last_error}"
-                    job.last_error = None
-                    job.last_response = fallback_json
-                    job.updated_at = datetime.utcnow()
-                    job.used_fallback = True
-
-                print(f"✅ Fallback config generated successfully for job {job_id}")
-
-            except Exception as fallback_err:
-                # Even fallback failed, mark as failed
-                with config_jobs_lock:
-                    job.status = "failed"
-                    job.error_message = f"LLM error: {last_error}. Fallback error: {str(fallback_err)}"
-                    job.updated_at = datetime.utcnow()
-                    if last_response:
-                        job.config_json = last_response
-                        job.last_response = last_response
+            with config_jobs_lock:
+                job.status = "failed"
+                job.config = None
+                job.config_json = None
+                job.updated_at = datetime.utcnow()
+                job.last_response = last_response
+                job.last_error = last_error
+                job.error_message = (
+                    last_error
+                    if last_error
+                    else "Config generation failed after exhausting all retries."
+                )
 
         config_job_queue.task_done()
 

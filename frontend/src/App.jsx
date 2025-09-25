@@ -10,7 +10,7 @@ import { api } from './utils/api'
 
 function App() {
   const [scenario, setScenario] = useState('')
-  const [configJson, setConfigJson] = useState('')
+  const [configJson, setConfigJsonState] = useState('')
   const [otlpEndpoint, setOtlpEndpoint] = useState('http://localhost:4318')
   const [apiKey, setApiKey] = useState('')
   const [authType, setAuthType] = useState('ApiKey')
@@ -24,6 +24,12 @@ function App() {
   const [configJobId, setConfigJobId] = useState(null)
   const [configJobStatus, setConfigJobStatus] = useState(null)
   const activeConfigJobRef = useRef(null)
+  const configSourceRef = useRef('none')
+
+  const updateConfigJson = (value, source = 'manual') => {
+    configSourceRef.current = source
+    setConfigJsonState(value)
+  }
 
   // Sync state with backend status
   const checkStatus = async () => {
@@ -31,8 +37,10 @@ function App() {
       const statusData = await api.get('/status')
       setIsDemoRunning(statusData.running)
       setCurrentJobId(statusData.job_id)
-      if (statusData.config) {
-        setConfigJson(JSON.stringify(statusData.config, null, 2))
+      if (statusData.running && statusData.config) {
+        updateConfigJson(JSON.stringify(statusData.config, null, 2), 'status')
+      } else if (!statusData.running && configSourceRef.current === 'status') {
+        updateConfigJson('', 'none')
       }
       
       // If we have a job ID, get detailed job info for error handling
@@ -80,9 +88,9 @@ function App() {
 
         if (status.status === 'succeeded') {
           if (status.config_json) {
-            setConfigJson(status.config_json)
+            updateConfigJson(status.config_json, 'generator')
           } else if (status.config) {
-            setConfigJson(JSON.stringify(status.config, null, 2))
+            updateConfigJson(JSON.stringify(status.config, null, 2), 'generator')
           }
           setError('')
           setIsLoading(false)
@@ -121,7 +129,7 @@ function App() {
 
   const handleGenerateConfig = async () => {
     setIsLoading(true)
-    setConfigJson('')
+    updateConfigJson('', 'none')
     setError('')
     setConfigJobStatus('pending')
     setConfigJobId(null)
@@ -205,7 +213,7 @@ function App() {
             setScenario={setScenario}
             handleGenerateConfig={handleGenerateConfig}
             isLoading={isLoading}
-            setConfigJson={setConfigJson}
+            setConfigJson={updateConfigJson}
             configJobId={configJobId}
             configJobStatus={configJobStatus}
           />
