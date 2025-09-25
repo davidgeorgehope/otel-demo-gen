@@ -28,7 +28,6 @@ frontend:
 
 config:
   llmProvider: bedrock
-  openaiModel: o3
   bedrockModelId: us.anthropic.claude-sonnet-4-20250514-v1:0
   logLevel: INFO
   corsOrigins: http://localhost:3000,https://your-domain.com
@@ -36,7 +35,6 @@ config:
   backendHost: 0.0.0.0
 
 secrets:
-  openaiApiKey: ""
   awsAccessKeyId: ""
   awsSecretAccessKey: ""
   awsRegion: us-east-1

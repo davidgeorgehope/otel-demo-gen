@@ -5,7 +5,6 @@ metadata:
 
 data:
   LLM_PROVIDER: "{{ .Values.config.llmProvider }}"
-  OPENAI_MODEL: "{{ .Values.config.openaiModel }}"
   BEDROCK_MODEL_ID: "{{ .Values.config.bedrockModelId }}"
   LOG_LEVEL: "{{ .Values.config.logLevel }}"
   CORS_ORIGINS: "{{ .Values.config.corsOrigins }}"

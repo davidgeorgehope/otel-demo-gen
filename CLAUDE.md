@@ -93,7 +93,7 @@ OpenTelemetry Collector
 
 ### Key Features
 - **Multi-User Job Management**: Supports concurrent telemetry generation jobs
-- **Multiple LLM Providers**: OpenAI and Amazon Bedrock support
+- **Amazon Bedrock Integration**: Reliable JSON generation via Anthropic Claude models on Bedrock
 - **Flexible Authentication**: Support for Bearer tokens and ApiKey authentication
 - **Realistic Telemetry**: Multi-language simulation with runtime-specific metrics
 - **Advanced Configuration**: Business operations, latency simulation, example queries
@@ -104,11 +104,7 @@ OpenTelemetry Collector
 ### Environment Variables
 ```bash
 # LLM Provider (required for config generation)
-LLM_PROVIDER=openai|bedrock
-
-# OpenAI Configuration
-OPENAI_API_KEY=sk-your-key-here
-OPENAI_MODEL=gpt-4o-mini  # Default model
+LLM_PROVIDER=bedrock
 
 # Amazon Bedrock Configuration
 AWS_ACCESS_KEY_ID=your-access-key
@@ -297,7 +293,12 @@ docker-compose up --build
 
 # Backend only
 cd backend && docker build -t otel-demo-backend .
-docker run -p 8000:8000 -e OPENAI_API_KEY=$OPENAI_API_KEY otel-demo-backend
+docker run -p 8000:8000 \
+  -e LLM_PROVIDER=bedrock \
+  -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+  -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+  -e AWS_REGION=${AWS_REGION:-us-east-1} \
+  otel-demo-backend
 ```
 
 ### Kubernetes

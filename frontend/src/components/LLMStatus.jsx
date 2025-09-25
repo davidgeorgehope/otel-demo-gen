@@ -57,14 +57,8 @@ function LLMStatus() {
   }
 
   const getProviderIcon = (provider) => {
-    switch (provider) {
-      case 'openai':
-        return '🤖'
-      case 'bedrock':
-        return '☁️'
-      default:
-        return '❓'
-    }
+    if (provider === 'bedrock') return '☁️'
+    return '❓'
   }
 
   return (
@@ -98,10 +92,6 @@ function LLMStatus() {
           <div className="text-sm text-gray-400 space-y-1">
             <p><span className="font-medium">Model:</span> {llmConfig.model}</p>
             
-            {llmConfig.provider === 'openai' && (
-              <p><span className="font-medium">API Key:</span> {llmConfig.details.api_key_set ? '✓ Set' : '✗ Not Set'}</p>
-            )}
-            
             {llmConfig.provider === 'bedrock' && (
               <>
                 <p><span className="font-medium">AWS Access Key:</span> {llmConfig.details.aws_access_key_set ? '✓ Set' : '✗ Not Set'}</p>
@@ -109,13 +99,16 @@ function LLMStatus() {
                 <p><span className="font-medium">AWS Region:</span> {llmConfig.details.aws_region}</p>
               </>
             )}
+
+            {llmConfig.details.error && (
+              <p className="text-red-400"><span className="font-medium">Error:</span> {llmConfig.details.error}</p>
+            )}
           </div>
           
           {!llmConfig.configured && (
             <div className="mt-3 p-3 bg-yellow-900 rounded border border-yellow-600">
               <p className="text-sm text-yellow-300">
                 ⚠️ LLM provider not configured. Config generation will not work.
-                {llmConfig.provider === 'openai' && ' Set OPENAI_API_KEY environment variable.'}
                 {llmConfig.provider === 'bedrock' && ' Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.'}
               </p>
             </div>

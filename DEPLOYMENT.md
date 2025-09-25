@@ -7,7 +7,7 @@ This guide covers deployment options for the AI-Powered Observability Demo Gener
 - Docker & Docker Compose
 - Kubernetes cluster (for K8s deployment)
 - kubectl configured for your cluster
-- OpenAI API key or AWS credentials for Bedrock
+- AWS credentials for Amazon Bedrock
 
 ## Environment Setup
 
@@ -25,11 +25,8 @@ nano .env
 
 Required environment variables:
 ```bash
-# OpenAI Configuration (if using OpenAI)
-OPENAI_API_KEY=your-openai-api-key-here
-OPENAI_MODEL=gpt-4o-mini
-
-# AWS Bedrock Configuration (if using Bedrock)
+# Amazon Bedrock Configuration
+LLM_PROVIDER=bedrock
 AWS_ACCESS_KEY_ID=your-aws-access-key-here
 AWS_SECRET_ACCESS_KEY=your-aws-secret-key-here
 AWS_REGION=us-east-1
@@ -97,7 +94,6 @@ Update the secret configuration with your actual values:
 nano k8s/secret.yaml
 
 # Replace placeholder values with real ones:
-# - your-openai-api-key-here
 # - your-aws-access-key-here
 # - your-aws-secret-key-here
 ```

@@ -3,7 +3,6 @@ uvicorn[standard]
 pydantic
 httpx
 python-dotenv
-openai
 requests
 boto3
 h2

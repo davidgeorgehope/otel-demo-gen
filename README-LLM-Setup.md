@@ -1,130 +1,106 @@
 # LLM Provider Setup Guide
 
-The OTEL Demo Generator supports multiple LLM providers for generating telemetry configurations. You can choose between OpenAI and Amazon Bedrock.
+The OTEL Demo Generator now uses **Amazon Bedrock** exclusively for LLM-powered configuration and scenario generation. Follow the steps below to configure the required credentials and verify your setup.
 
-## Environment Configuration
+## 1. Prepare Environment Variables
 
-1. Copy the example environment file:
-```bash
-cp .env.example .env
-```
+1. Copy the example environment file and update it with your Bedrock credentials:
+   ```bash
+   cp .env.example .env
+   ```
 
-2. Edit the `.env` file with your preferred LLM provider configuration.
+2. Edit `.env` (or your deployment manifest) with the following values:
+   ```env
+   LLM_PROVIDER=bedrock
+   AWS_ACCESS_KEY_ID=your-aws-access-key
+   AWS_SECRET_ACCESS_KEY=your-aws-secret-key
+   AWS_REGION=us-east-1
+   BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
+   ```
 
-## Option 1: OpenAI Configuration
+   - `AWS_REGION` must be a region where Amazon Bedrock is available (for example `us-east-1`, `us-west-2`, or `eu-central-1`).
+   - `BEDROCK_MODEL_ID` can be any supported Anthropic Claude model. The defaults above target Claude 3.5 Sonnet.
 
-Set the following environment variables in your `.env` file:
+## 2. Grant IAM Permissions
 
-```env
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-your-openai-api-key-here
-OPENAI_MODEL=gpt-4o-mini
-```
+The AWS credentials you supply must have permission to invoke your chosen model:
 
-**Getting OpenAI API Key:**
-1. Go to [OpenAI Platform](https://platform.openai.com/)
-2. Sign up or log in
-3. Navigate to API Keys section
-4. Create a new secret key
-
-**Supported Models:**
-- `gpt-4o-mini` (default, cost-effective)
-- `gpt-4o`
-- `gpt-4-turbo`
-- `gpt-3.5-turbo`
-
-## Option 2: Amazon Bedrock Configuration
-
-Set the following environment variables in your `.env` file:
-
-```env
-LLM_PROVIDER=bedrock
-AWS_ACCESS_KEY_ID=your-aws-access-key
-AWS_SECRET_ACCESS_KEY=your-aws-secret-key
-AWS_REGION=us-east-1
-BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
-```
-
-**Getting AWS Credentials:**
-1. Log in to [AWS Console](https://console.aws.amazon.com/)
-2. Go to IAM → Users
-3. Create or select a user
-4. Generate access keys with Bedrock permissions
-
-**Required IAM Permissions:**
 ```json
 {
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": [
-                "bedrock:InvokeModel"
-            ],
-            "Resource": "*"
-        }
-    ]
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel"
+      ],
+      "Resource": "*"
+    }
+  ]
 }
 ```
 
-**Supported Claude Models:**
-- `anthropic.claude-3-5-sonnet-20241022-v2:0` (default, latest)
-- `anthropic.claude-3-5-sonnet-20240620-v1:0`
-- `anthropic.claude-3-haiku-20240307-v1:0`
+Attach this policy (or an equivalent, more restrictive version) to the IAM user or role whose keys you are using.
 
-## Testing Configuration
+## 3. Start the Backend and Verify
 
-After setting up your `.env` file:
-
-1. Start the backend:
 ```bash
 cd backend
 uvicorn main:app --reload --port 8000
 ```
 
-2. Check LLM configuration status:
+Check that the backend can read your Bedrock configuration:
+
 ```bash
 curl http://localhost:8000/llm-config
 ```
 
-3. Test config generation:
+A healthy response looks like:
+
+```json
+{
+  "provider": "bedrock",
+  "configured": true,
+  "model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+  "details": {
+    "aws_access_key_set": true,
+    "aws_secret_key_set": true,
+    "aws_region": "us-east-1",
+    "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0"
+  }
+}
+```
+
+## 4. Test Config Generation
+
 ```bash
 curl -X POST http://localhost:8000/generate-config \
   -H "Content-Type: application/json" \
   -d '{"description": "Simple web app with frontend, backend, and database"}'
 ```
 
-## No LLM Provider Mode
+The response should return a job identifier. Poll the job endpoint until status becomes `succeeded`:
 
-If no LLM provider is configured, you can still:
-- Use the "Load Test Config" button in the UI
-- Access the test config endpoint: `GET /test-config`
-- Start telemetry generation with pre-built configurations
+```bash
+curl http://localhost:8000/generate-config/<job_id>
+```
 
-## Troubleshooting
+## 5. Operating Without Bedrock
 
-### OpenAI Issues
-- **401 Unauthorized**: Check your API key
-- **429 Too Many Requests**: You've hit rate limits
-- **Model not found**: Verify the model name
+If you do not provide Bedrock credentials, you can still:
+- Load the sample configuration via the UI.
+- Call `GET /test-config` to retrieve a predefined scenario.
+- Manually craft configurations and submit them to `/start`.
 
-### Bedrock Issues
-- **Access Denied**: Check IAM permissions
-- **Region not supported**: Verify Bedrock is available in your region
-- **Model not found**: Ensure the model ID is correct
+## 6. Troubleshooting
 
-### General Issues
-- **Backend won't start**: Check all environment variables are set correctly
-- **Config generation fails**: Verify LLM provider status in the UI
+- **`Unsupported LLM provider` error** – Ensure `LLM_PROVIDER=bedrock` everywhere (local env, Kubernetes secrets, Helm values, etc.).
+- **`AWS credentials not found` error** – Confirm both `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are present.
+- **`AccessDeniedException` from Bedrock** – Verify the IAM user/role has the `bedrock:InvokeModel` permission and that Bedrock is enabled in the selected region.
+- **Schema validation failures** – The backend now retries with validation feedback, but you can inspect `last_error` fields from `/generate-config/<job_id>` for details.
 
-## Cost Considerations
+## 7. Cost Awareness
 
-### OpenAI Pricing (approximate)
-- GPT-4o-mini: ~$0.00015 per generation
-- GPT-4o: ~$0.01 per generation
+Amazon Bedrock usage is billed per token. Claude 3.5 Sonnet typically costs about **$0.003** per 1K output tokens (subject to region and current pricing). Monitor your AWS usage to avoid surprises.
 
-### Bedrock Pricing (approximate)
-- Claude 3.5 Sonnet: ~$0.003 per generation
-- Claude 3 Haiku: ~$0.00025 per generation
-
-Prices vary by input/output token count and may change. Check official pricing pages for current rates.
+With these steps complete, the OTEL Demo Generator will use Amazon Bedrock for reliable JSON generation and scenario creation.

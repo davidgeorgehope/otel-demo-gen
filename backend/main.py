@@ -923,40 +923,34 @@ async def get_llm_config():
     """
     Returns information about the current LLM provider configuration.
     """
-    provider = os.getenv("LLM_PROVIDER", "openai").lower()
-    
+    provider = os.getenv("LLM_PROVIDER", "bedrock").lower()
+
     config_status = {
         "provider": provider,
         "configured": False,
         "model": None,
         "details": {}
     }
-    
-    if provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY")
-        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        config_status["configured"] = bool(api_key)
-        config_status["model"] = model
-        config_status["details"] = {
-            "api_key_set": bool(api_key),
-            "model": model
-        }
-    elif provider == "bedrock":
-        aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
-        aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-        aws_region = os.getenv("AWS_REGION", "us-east-1")
-        model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0")
-        
-        config_status["configured"] = bool(aws_access_key and aws_secret_key)
-        config_status["model"] = model_id
-        config_status["details"] = {
-            "aws_access_key_set": bool(aws_access_key),
-            "aws_secret_key_set": bool(aws_secret_key),
-            "aws_region": aws_region,
-            "model_id": model_id
-        }
-    else:
-        config_status["details"]["error"] = f"Unsupported provider: {provider}"
+
+    if provider != "bedrock":
+        config_status["details"]["error"] = (
+            "Unsupported provider configured. Set LLM_PROVIDER=bedrock and supply AWS credentials."
+        )
+        return config_status
+
+    aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
+    aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+    aws_region = os.getenv("AWS_REGION", "us-east-1")
+    model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0")
+
+    config_status["configured"] = bool(aws_access_key and aws_secret_key)
+    config_status["model"] = model_id
+    config_status["details"] = {
+        "aws_access_key_set": bool(aws_access_key),
+        "aws_secret_key_set": bool(aws_secret_key),
+        "aws_region": aws_region,
+        "model_id": model_id
+    }
     
     return config_status
 
@@ -1155,10 +1149,10 @@ async def generate_scenario(request: ScenarioGenerationRequest):
     except ValueError as e:
         # Handle missing API keys or configuration errors
         error_message = str(e)
-        if "OpenAI API key not found" in error_message:
+        if "Unsupported LLM provider" in error_message:
             raise HTTPException(
                 status_code=400,
-                detail="OpenAI API key not configured. Please set the OPENAI_API_KEY environment variable."
+                detail="Unsupported LLM provider configured. Set LLM_PROVIDER=bedrock."
             )
         elif "AWS credentials not found" in error_message:
             raise HTTPException(

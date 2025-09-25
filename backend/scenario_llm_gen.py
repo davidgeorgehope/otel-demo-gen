@@ -9,17 +9,15 @@ from typing import Dict, List, Any, Optional
 from config_schema import ScenarioModification, ScenarioParameter, ContextualPattern
 
 def generate_scenario_from_description(description: str, context: Optional[Dict[str, Any]] = None) -> ScenarioModification:
-    """
-    Uses LLM to generate a scenario modification from a natural language description.
-    """
-    provider = os.getenv("LLM_PROVIDER", "openai").lower()
+    """Uses the configured Bedrock model to generate a scenario modification."""
+    provider = os.getenv("LLM_PROVIDER", "bedrock").lower()
 
-    if provider == "openai":
-        return _generate_scenario_openai(description, context)
-    elif provider == "bedrock":
-        return _generate_scenario_bedrock(description, context)
-    else:
-        raise ValueError(f"Unsupported LLM provider: {provider}")
+    if provider != "bedrock":
+        raise ValueError(
+            f"Unsupported LLM provider '{provider}'. Only 'bedrock' is supported; update LLM_PROVIDER to 'bedrock'."
+        )
+
+    return _generate_scenario_bedrock(description, context)
 
 def _build_system_prompt(context: Optional[Dict[str, Any]] = None) -> str:
     """Build the system prompt for scenario generation."""
@@ -94,76 +92,30 @@ GUIDELINES:
 
     return base_prompt
 
-def _generate_scenario_openai(description: str, context: Optional[Dict[str, Any]] = None) -> ScenarioModification:
-    """Generate scenario using OpenAI."""
-    try:
-        import openai
-    except ImportError:
-        raise ImportError("OpenAI library not installed. Run: pip install openai")
+def _normalize_json_text(raw_text: str) -> str:
+    """Normalize raw model text into clean JSON."""
+    if not raw_text:
+        return raw_text
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
+    text = raw_text.strip()
 
-    client = openai.OpenAI(api_key=api_key)
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
 
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _build_system_prompt(context)},
-                {"role": "user", "content": f"Generate a scenario for: {description}"}
-            ],
-            temperature=0.3,
-            max_tokens=1000
-        )
+    if text.lower().startswith("json\n"):
+        text = text[5:].lstrip()
 
-        scenario_json = response.choices[0].message.content.strip()
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1 and end >= start:
+        text = text[start:end + 1]
 
-        # Clean up JSON if it has markdown formatting
-        if scenario_json.startswith("```json"):
-            scenario_json = scenario_json.replace("```json", "").replace("```", "").strip()
-        elif scenario_json.startswith("```"):
-            scenario_json = scenario_json.replace("```", "").strip()
-
-        scenario_data = json.loads(scenario_json)
-
-        # Convert to ScenarioModification
-        parameters = [
-            ScenarioParameter(
-                key=p["key"],
-                value=p["value"],
-                unit=p.get("unit")
-            ) for p in scenario_data["parameters"]
-        ]
-
-        # Convert contextual patterns
-        contextual_patterns = []
-        if "contextual_patterns" in scenario_data:
-            contextual_patterns = [
-                ContextualPattern(
-                    attribute_name=cp["attribute_name"],
-                    failure_values=cp["failure_values"],
-                    normal_values=cp["normal_values"],
-                    description=cp["description"]
-                ) for cp in scenario_data["contextual_patterns"]
-            ]
-
-        return ScenarioModification(
-            type=scenario_data["type"],
-            target_services=scenario_data["target_services"],
-            target_operations=scenario_data.get("target_operations", []),
-            parameters=parameters,
-            contextual_patterns=contextual_patterns,
-            ramp_up_seconds=scenario_data.get("ramp_up_seconds", 0),
-            ramp_down_seconds=scenario_data.get("ramp_down_seconds", 0)
-        )
-
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse LLM response as JSON: {e}")
-    except Exception as e:
-        raise ValueError(f"OpenAI API error: {e}")
+    return text
 
 def _generate_scenario_bedrock(description: str, context: Optional[Dict[str, Any]] = None) -> ScenarioModification:
     """Generate scenario using Amazon Bedrock."""
@@ -206,13 +158,9 @@ def _generate_scenario_bedrock(description: str, context: Optional[Dict[str, Any
         )
 
         response_body = json.loads(response['body'].read().decode('utf-8'))
-        scenario_json = response_body['content'][0]['text'].strip()
-
-        # Clean up JSON if it has markdown formatting
-        if scenario_json.startswith("```json"):
-            scenario_json = scenario_json.replace("```json", "").replace("```", "").strip()
-        elif scenario_json.startswith("```"):
-            scenario_json = scenario_json.replace("```", "").strip()
+        content_block = response_body.get('content', [{}])[0]
+        scenario_text = content_block.get('text', '').strip()
+        scenario_json = _normalize_json_text(scenario_text)
 
         scenario_data = json.loads(scenario_json)
 

@@ -1,26 +1,19 @@
 import os
 import json
-from openai import OpenAI
+from typing import Any, Optional
+
 import boto3
 from dotenv import load_dotenv
-from typing import Any
+from pydantic import ValidationError
+
+from config_schema import ScenarioConfig
 
 
 load_dotenv()
 
 # Don't initialize clients on import - do them lazily
-openai_client = None
 bedrock_client = None
 
-def _get_openai_client():
-    """Get or create the OpenAI client lazily."""
-    global openai_client
-    if openai_client is None:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.")
-        openai_client = OpenAI(api_key=api_key)
-    return openai_client
 
 def _get_bedrock_client():
     """Get or create the Bedrock client lazily."""
@@ -42,26 +35,6 @@ def _get_bedrock_client():
             region_name=aws_region
         )
     return bedrock_client
-
-def _get_llm_provider():
-    """Get the configured LLM provider."""
-    return os.getenv("LLM_PROVIDER", "openai").lower()
-
-def _call_openai(prompt: str) -> str:
-    """Call OpenAI API."""
-    client = _get_openai_client()
-    model = os.getenv("OPENAI_MODEL", "o3")
-    
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=float(os.getenv("OPENAI_TEMPERATURE", "0")),
-        response_format={"type": "json_object"},
-    )
-    return completion.choices[0].message.content
 
 def _call_bedrock(prompt: str) -> str:
     """Call Amazon Bedrock Claude API."""
@@ -99,23 +72,79 @@ def _call_bedrock(prompt: str) -> str:
             body=json.dumps(request_body),
             contentType="application/json"
         )
-        
-        # Parse response
-        response_body = json.loads(response['body'].read())
-        content_blocks = response_body.get('content', [])
+
+        response_body = json.loads(response["body"].read())
+        content_blocks = response_body.get("content", [])
 
         for block in content_blocks:
-            if block.get('type') == 'tool_use' and block.get('name') == 'emit_config':
-                return json.dumps(block.get('input', {}))
-            if block.get('type') == 'text':
-                return block.get('text', '')
+            if block.get("type") == "tool_use" and block.get("name") == "emit_config":
+                return json.dumps(block.get("input", {}))
+            if block.get("type") == "text" and block.get("text"):
+                return block["text"]
 
         # Fallback to serialized response if no tool output present
         return json.dumps(response_body)
-        
+
     except Exception as e:
         print(f"Error calling Bedrock API: {e}")
         raise
+
+
+def _normalize_json_text(raw_text: str) -> str:
+    """Strip markdown fences and isolate the JSON object."""
+    if not raw_text:
+        return raw_text
+
+    text = raw_text.strip()
+
+    if text.startswith("```"):
+        lines = text.splitlines()
+        # Drop opening fence
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        # Drop closing fence
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    if text.lower().startswith("json\n"):
+        text = text[5:].lstrip()
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end >= start:
+        text = text[start:end + 1]
+
+    return text
+
+
+def _format_validation_error(error: str) -> str:
+    """Tidy up noisy validation errors for prompt inclusion."""
+    lines = [line.strip() for line in error.splitlines() if line.strip()]
+    if not lines:
+        return error
+    # Limit to first ~20 lines to avoid overwhelming prompt
+    return "\n".join(lines[:20])
+
+
+def _build_retry_prompt(description: str, last_error: Optional[str], previous_output: Optional[str]) -> str:
+    """Create a retry prompt that includes validation feedback."""
+    parts = [description.strip(),
+             "\nThe previous JSON output failed validation with this error:",
+             last_error or "Unknown validation error.",
+             "\nREQUIREMENTS:",
+             "- Emit valid JSON that matches the provided schema.",
+             "- Do not include markdown fences or comments.",
+             "- Ensure required sections like services, telemetry, log_samples are present." ]
+
+    if previous_output:
+        parts.extend([
+            "\nPrevious JSON output for reference:",
+            previous_output.strip()
+        ])
+
+    parts.append("\nRegenerate a corrected JSON document that satisfies all schema constraints.")
+    return "\n".join(parts)
 
 SCENARIO_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -273,34 +302,38 @@ EXPECTED JSON SCHEMA:
 {SCENARIO_SCHEMA_TEXT}
 """
 
-def generate_config_from_description(description: str) -> str:
-    """Generate a JSON configuration from a natural language description using an LLM."""
-    try:
-        provider = _get_llm_provider()
-        
-        if provider == "openai":
-            response_content = _call_openai(description)
-        elif provider == "bedrock":
-            response_content = _call_bedrock(description)
-        else:
-            raise ValueError(f"Unsupported LLM provider: {provider}. Use 'openai' or 'bedrock'.")
-        
-        # The LLM sometimes wraps the output in ```json ... ```, so we strip that.
-        if response_content.startswith("```json"):
-            response_content = response_content[7:]
-        elif response_content.startswith("```"):
-            response_content = response_content[3:]
-        if response_content.endswith("```"):
-            response_content = response_content[:-3]
-        
-        return response_content.strip()
+def generate_config_from_description(description: str, *, max_attempts: int = 3) -> str:
+    """Generate a JSON configuration from a natural language description using Amazon Bedrock."""
 
-    except ValueError as e:
-        # Re-raise ValueError with the configuration message
-        raise e
-    except Exception as e:
-        print(f"Error calling LLM API: {e}")
-        raise
+    if not description or not description.strip():
+        raise ValueError("Description must not be empty.")
+
+    last_error: Optional[str] = None
+    previous_output: Optional[str] = None
+
+    for attempt in range(max(1, max_attempts)):
+        prompt = description if attempt == 0 else _build_retry_prompt(description, last_error, previous_output)
+
+        raw_response = _call_bedrock(prompt)
+        normalized = _normalize_json_text(raw_response)
+
+        previous_output = normalized
+
+        try:
+            parsed = json.loads(normalized)
+        except json.JSONDecodeError as decode_err:
+            last_error = _format_validation_error(f"JSON decoding error: {decode_err}")
+            continue
+
+        try:
+            scenario = ScenarioConfig(**parsed)
+            # Return a compact JSON string suitable for downstream processing
+            return json.dumps(scenario.model_dump())
+        except ValidationError as validation_err:
+            last_error = _format_validation_error(str(validation_err))
+            continue
+
+    raise ValueError(last_error or "Failed to generate configuration that matches the schema.")
 
 if __name__ == '__main__':
     # Example usage for testing

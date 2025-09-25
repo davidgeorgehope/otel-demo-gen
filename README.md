@@ -48,14 +48,8 @@ This tool generates realistic telemetry data (traces, logs, and metrics) for use
 
 ## 🤖 LLM Provider Setup
 
-### Option 1: OpenAI (Default)
-```env
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-your-openai-api-key-here
-OPENAI_MODEL=gpt-4o-mini
-```
+This project now uses Amazon Bedrock exclusively for LLM-powered generation.
 
-### Option 2: Amazon Bedrock (Claude Sonnet 4)
 ```env
 LLM_PROVIDER=bedrock
 AWS_ACCESS_KEY_ID=your-aws-access-key
@@ -64,13 +58,12 @@ AWS_REGION=us-east-1
 BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
 ```
 
-### No LLM Provider
-If no LLM is configured, you can still:
+If Bedrock credentials are not provided, you can still:
 - Use the "Load Test Config" button
-- Create jobs with pre-built configurations
-- Access test config via `GET /test-config`
+- Create jobs with the bundled templates
+- Access the sample config via `GET /test-config`
 
-📖 **Detailed Setup**: See [README-LLM-Setup.md](./README-LLM-Setup.md) for complete configuration guide.
+📖 **Detailed Setup**: See [README-LLM-Setup.md](./README-LLM-Setup.md) for the full configuration guide.
 
 ## 👥 Multi-User Job Management
 
@@ -172,11 +165,12 @@ kubectl apply -f k8s/
 
 ### Environment Variables
 ```env
-# Required for LLM generation
-LLM_PROVIDER=openai|bedrock
-OPENAI_API_KEY=sk-...        # For OpenAI
-AWS_ACCESS_KEY_ID=...        # For Bedrock
-AWS_SECRET_ACCESS_KEY=...    # For Bedrock
+# Required for LLM generation (Bedrock only)
+LLM_PROVIDER=bedrock
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
 
 # Optional
 OTEL_COLLECTOR_URL=http://localhost:4318
