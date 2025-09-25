@@ -1,3 +1,4 @@
+import logging
 import os
 import json
 from typing import Any, Optional
@@ -13,6 +14,8 @@ load_dotenv()
 
 # Don't initialize clients on import - do them lazily
 bedrock_client = None
+
+logger = logging.getLogger(__name__)
 
 
 def _get_bedrock_client():
@@ -85,8 +88,8 @@ def _call_bedrock(prompt: str) -> str:
         # Fallback to serialized response if no tool output present
         return json.dumps(response_body)
 
-    except Exception as e:
-        print(f"Error calling Bedrock API: {e}")
+    except Exception:
+        logger.exception("Error calling Bedrock API")
         raise
 
 
@@ -145,6 +148,16 @@ def _build_retry_prompt(description: str, last_error: Optional[str], previous_ou
 
     parts.append("\nRegenerate a corrected JSON document that satisfies all schema constraints.")
     return "\n".join(parts)
+
+
+def _preview_text(text: Optional[str], limit: int = 800) -> str:
+    """Return a truncated preview of potentially long model output for logging."""
+    if not text:
+        return ""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...[truncated]"
 
 SCENARIO_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -311,7 +324,9 @@ def generate_config_from_description(description: str, *, max_attempts: int = 3)
     last_error: Optional[str] = None
     previous_output: Optional[str] = None
 
-    for attempt in range(max(1, max_attempts)):
+    total_attempts = max(1, max_attempts)
+
+    for attempt in range(total_attempts):
         prompt = description if attempt == 0 else _build_retry_prompt(description, last_error, previous_output)
 
         raw_response = _call_bedrock(prompt)
@@ -323,14 +338,29 @@ def generate_config_from_description(description: str, *, max_attempts: int = 3)
             parsed = json.loads(normalized)
         except json.JSONDecodeError as decode_err:
             last_error = _format_validation_error(f"JSON decoding error: {decode_err}")
+            logger.warning(
+                "Config generation attempt %d/%d failed JSON decode: %s | preview=%s",
+                attempt + 1,
+                total_attempts,
+                decode_err,
+                _preview_text(normalized)
+            )
             continue
 
         try:
             scenario = ScenarioConfig(**parsed)
             # Return a compact JSON string suitable for downstream processing
+            logger.info("Config generation attempt %d/%d succeeded", attempt + 1, total_attempts)
             return json.dumps(scenario.model_dump())
         except ValidationError as validation_err:
             last_error = _format_validation_error(str(validation_err))
+            logger.warning(
+                "Config generation attempt %d/%d failed validation: %s | preview=%s",
+                attempt + 1,
+                total_attempts,
+                last_error,
+                _preview_text(normalized)
+            )
             continue
 
     raise ValueError(last_error or "Failed to generate configuration that matches the schema.")

@@ -12,12 +12,16 @@ import time
 import httpx
 import json
 import queue
+import logging
 from dataclasses import dataclass, field
 
 from config_schema import GenerateConfigRequest, StartDemoRequest, ScenarioConfig, ScenarioGenerationRequest, ScenarioApplyRequest, ActiveScenario, ScenarioModification
 from generator import TelemetryGenerator
 from llm_config_gen import generate_config_from_description
 from scenario_llm_gen import generate_scenario_from_description, get_predefined_templates
+
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="AI-Powered Observability Demo Generator",
@@ -193,6 +197,14 @@ def config_generation_worker():
                         job.last_error = last_error
                         job.last_response = raw_config_str
                         job.updated_at = datetime.utcnow()
+                    logger.warning(
+                        "Config job %s attempt %d/%d JSON decode error: %s | preview=%s",
+                        job_id,
+                        attempt_index + 1,
+                        job.max_attempts,
+                        decode_err,
+                        (raw_config_str[:800] + "...[truncated]") if raw_config_str and len(raw_config_str) > 800 else raw_config_str
+                    )
                     continue
 
                 try:
@@ -204,6 +216,14 @@ def config_generation_worker():
                         job.last_error = last_error
                         job.last_response = raw_config_str
                         job.updated_at = datetime.utcnow()
+                    logger.warning(
+                        "Config job %s attempt %d/%d schema validation error: %s | preview=%s",
+                        job_id,
+                        attempt_index + 1,
+                        job.max_attempts,
+                        validation_err,
+                        (raw_config_str[:800] + "...[truncated]") if raw_config_str and len(raw_config_str) > 800 else raw_config_str
+                    )
                     continue
 
                 pretty_json = json.dumps(validated_config, indent=2)
@@ -225,6 +245,7 @@ def config_generation_worker():
                     job.last_error = last_error
                     job.last_response = last_response
                     job.updated_at = datetime.utcnow()
+                logger.exception("Config job %s attempt %d/%d failed with unexpected error", job_id, attempt_index + 1, job.max_attempts)
                 break
 
         if not success:
