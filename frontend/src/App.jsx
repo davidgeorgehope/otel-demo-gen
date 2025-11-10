@@ -237,7 +237,11 @@ function App() {
           )}
         </div>
         <div>
-          <ConfigDisplay configJson={configJson} />
+          <ConfigDisplay
+            configJson={configJson}
+            onConfigChange={(value) => updateConfigJson(value, 'manual')}
+            isGenerating={isLoading}
+          />
         </div>
       </main>
     )

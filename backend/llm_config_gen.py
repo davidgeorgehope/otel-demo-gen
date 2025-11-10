@@ -207,7 +207,24 @@ SCENARIO_RESPONSE_SCHEMA: dict[str, Any] = {
                 "required": ["name", "language", "log_samples"],
                 "properties": {
                     "name": {"type": "string"},
-                    "language": {"type": "string"},
+                    "language": {
+                        "type": "string",
+                        "enum": [
+                            "opentelemetry/cpp",
+                            "opentelemetry/dotnet",
+                            "opentelemetry/erlang",
+                            "opentelemetry/go",
+                            "opentelemetry/java",
+                            "opentelemetry/nodejs",
+                            "opentelemetry/php",
+                            "opentelemetry/python",
+                            "opentelemetry/ruby",
+                            "opentelemetry/rust",
+                            "opentelemetry/swift",
+                            "opentelemetry/android",
+                            "opentelemetry/webjs"
+                        ]
+                    },
                     "role": {"type": "string"},
                     "depends_on": {
                         "type": "array",
@@ -342,7 +359,7 @@ Produce a JSON object that satisfies the scenario description and the schema bel
 REQUIREMENTS
 1. Output only valid JSON (no code fences or commentary) that conforms to the schema.
 2. Populate 8-10 log_samples per service with 6-8 INFO entries and 2 ERROR entries, using realistic placeholders like {{user_id}}, {{order_id}}, {{duration_ms}}.
-3. Provide coherent dependencies (frontends -> backends -> data stores) and vary language assignments for services.
+3. Provide coherent dependencies (frontends -> backends -> data stores) and vary language assignments for services, using only these exact identifiers: opentelemetry/cpp, opentelemetry/dotnet, opentelemetry/erlang, opentelemetry/go, opentelemetry/java, opentelemetry/nodejs, opentelemetry/php, opentelemetry/python, opentelemetry/ruby, opentelemetry/rust, opentelemetry/swift, opentelemetry/android, opentelemetry/webjs.
 4. Use dependency keys exactly as specified (service, db, cache, queue).
 5. Keep latency objects well-formed and ensure probability defaults to 1.0 if omitted.
 6. Prefer detailed business_data definitions that match the service domain.
