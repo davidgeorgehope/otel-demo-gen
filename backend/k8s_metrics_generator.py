@@ -200,9 +200,10 @@ class K8sMetricsGenerator:
         }
         
         # Telemetry SDK attributes
+        language_value = (service.language or "python").lower()
         telemetry_attributes = {
             "telemetry.sdk.name": "opentelemetry",
-            "telemetry.sdk.language": service.language,
+            "telemetry.sdk.language": language_value,
             "telemetry.sdk.version": "1.24.0"
         }
         

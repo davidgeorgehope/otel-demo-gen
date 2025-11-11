@@ -7,7 +7,8 @@ import requests
 import json
 import httpx
 import uuid
-from typing import Dict, List, Any, Tuple, Union, Optional
+import re
+from typing import Dict, List, Any, Tuple, Union, Optional, Set
 from datetime import datetime, timezone
 
 from config_schema import ScenarioConfig, Service, ServiceDependency, DbDependency, CacheDependency, LatencyConfig, Operation, BusinessDataField, ScenarioModification
@@ -40,12 +41,17 @@ class TelemetryGenerator:
     RUNTIME_INFO = {
         "python": {"name": "CPython", "version": "3.11.5"},
         "java": {"name": "OpenJDK Runtime Environment", "version": "17.0.5"},
-        "nodejs": {"name": "node.js", "version": "18.12.1"},
-        "go": {"name": "go", "version": "1.21.0"},
-        "ruby": {"name": "ruby", "version": "3.2.2"},
+        "nodejs": {"name": "Node.js", "version": "18.12.1"},
+        "go": {"name": "Go", "version": "1.21.0"},
+        "ruby": {"name": "Ruby", "version": "3.2.2"},
         "dotnet": {"name": ".NET", "version": "7.0.0"},
-        "javascript": {"name": "node.js", "version": "18.12.1"},
-        "typescript": {"name": "node.js", "version": "18.12.1"},
+        "javascript": {"name": "Node.js", "version": "18.12.1"},
+        "typescript": {"name": "Node.js", "version": "18.12.1"},
+        "php": {"name": "PHP", "version": "8.2"},
+        "rust": {"name": "Rust", "version": "1.84.0"},
+        "swift": {"name": "Swift", "version": "5.10"},
+        "erlang": {"name": "Erlang/OTP", "version": "26.2"},
+        "cpp": {"name": "C++", "version": "23"},
     }
 
     def __init__(self, config: ScenarioConfig, otlp_endpoint: str, api_key: Optional[str] = None, auth_type: str = "ApiKey", failure_callback=None):
@@ -104,9 +110,9 @@ class TelemetryGenerator:
         self._error_counters = {s.name: 0 for s in self.config.services}
         self._runtime_counters = {s.name: 0 for s in self.config.services}
 
-
-
-
+    @staticmethod
+    def _get_service_language(service: Service) -> str:
+        return (service.language or 'python').lower()
 
     def _generate_k8s_telemetry(self):
         """The main loop for the k8s metrics generator thread."""
@@ -158,7 +164,7 @@ class TelemetryGenerator:
 
     def _generate_resource_attributes(self, service: Service, telemetry_type: str = "metrics") -> Dict[str, Any]:
         """Generates resource attributes for telemetry data compatible with collector processors."""
-        lang = service.language.lower()
+        lang = self._get_service_language(service)
         runtime_info = self.RUNTIME_INFO.get(lang, {"name": lang, "version": "1.0.0"})
         
         # Get k8s pod data for this service to maintain consistency
@@ -172,7 +178,7 @@ class TelemetryGenerator:
             "service.instance.id": f"{service.name}-{pod_data['pod_name']}",
             
             # Telemetry SDK attributes
-            "telemetry.sdk.language": service.language,
+            "telemetry.sdk.language": lang,
             "telemetry.sdk.name": "opentelemetry",
             "telemetry.sdk.version": "1.24.0",
             
@@ -332,29 +338,17 @@ class TelemetryGenerator:
             else:
                 return f"Operation '{span['name']}' handled."
 
-        # Replace placeholders in the message
         message = log_sample.message
-        replacements = {
-            "{user_id}": f"user_{secrets.randbelow(99999):05d}",
-            "{order_id}": f"ORD-{secrets.randbelow(999999):06d}",
-            "{payment_id}": f"PAY-{secrets.randbelow(999999):06d}",
-            "{duration_ms}": str(secrets.randbelow(500) + 10),
-            "{timeout_ms}": str(secrets.randbelow(5000) + 1000),
-            "{error_reason}": secrets.choice(["timeout", "connection_failed", "invalid_data", "rate_limit_exceeded"]),
-            "{region}": secrets.choice(["us-east-1", "us-west-2", "eu-west-1"]),
-            "{product_id}": f"PROD-{secrets.randbelow(9999):04d}",
-            "{item_count}": str(secrets.randbelow(10) + 1),
-            "{order_total}": f"{random.uniform(10.99, 599.99):.2f}",
-            "{payment_method}": secrets.choice(["credit_card_visa", "paypal", "bank_transfer"]),
-            "{session_id}": f"sess_{uuid.uuid4().hex[:8]}",
-        }
 
-        for placeholder, value in replacements.items():
-            message = message.replace(placeholder, value)
-
-        # Inject contextual data from scenarios
+        # Determine contextual attributes up front so we don't clobber scenario-specific placeholders
         is_error_span = span.get("status", {}).get("code") == "STATUS_CODE_ERROR"
         contextual_attrs = self._get_contextual_attributes(service_name, is_failure=is_error and is_error_span)
+        protected_placeholders = {
+            "{" + attr.replace(".", "_") + "}"
+            for attr in contextual_attrs
+        }
+
+        message = self._fill_log_placeholders(message, protected_placeholders)
         message = self._inject_contextual_data_into_log_message(message, contextual_attrs)
 
         return message
@@ -448,6 +442,87 @@ class TelemetryGenerator:
                     attributes[pattern.attribute_name] = value
 
         return attributes
+
+    def _fill_log_placeholders(self, message: str, protected_tokens: Optional[Set[str]] = None) -> str:
+        """Replace templated placeholders with realistic synthetic values."""
+        if not message:
+            return message
+
+        protected_tokens = protected_tokens or set()
+        placeholders = set(re.findall(r"{([^{}]+)}", message))
+        if not placeholders:
+            return message
+
+        for placeholder in placeholders:
+            token = "{" + placeholder + "}"
+            if token in protected_tokens:
+                continue
+
+            value = self._generate_placeholder_value(placeholder)
+            message = message.replace(token, value)
+
+        return message
+
+    def _generate_placeholder_value(self, placeholder: str) -> str:
+        """Generate a context-aware replacement for a placeholder token."""
+        normalized = placeholder.strip().lower()
+
+        predefined_generators = {
+            "user_id": lambda: f"user_{secrets.randbelow(99999):05d}",
+            "order_id": lambda: f"ord-{secrets.randbelow(999999):06d}",
+            "payment_id": lambda: f"pay-{secrets.randbelow(999999):06d}",
+            "session_id": lambda: f"sess_{uuid.uuid4().hex[:8]}",
+            "product_id": lambda: f"prod-{secrets.randbelow(9999):04d}",
+            "item_count": lambda: str(secrets.randbelow(10) + 1),
+            "error_reason": lambda: secrets.choice(["timeout", "connection_failed", "invalid_data", "rate_limit_exceeded"]),
+            "region": lambda: secrets.choice(["us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1"]),
+            "order_total": lambda: f"{random.uniform(10.99, 599.99):.2f}",
+            "payment_method": lambda: secrets.choice(["credit_card", "paypal", "bank_transfer", "apple_pay"]),
+        }
+
+        if normalized in predefined_generators:
+            return str(predefined_generators[normalized]())
+
+        numeric_ms_tokens = ["ms", "_ms", "milliseconds"]
+        if any(normalized.endswith(suffix) for suffix in numeric_ms_tokens) or "duration" in normalized:
+            return str(secrets.randbelow(4900) + 100)
+
+        if normalized.endswith("_seconds") or normalized.endswith("_secs"):
+            return str(secrets.randbelow(55) + 1)
+
+        if normalized.endswith("_count") or "count" in normalized:
+            return str(secrets.randbelow(900) + 1)
+
+        if normalized.endswith("_points") or "points" in normalized:
+            return str(secrets.randbelow(5000) + 50)
+
+        if normalized.endswith("_amount") or normalized.endswith("_total") or "amount" in normalized or "total" in normalized:
+            return f"{random.uniform(5.0, 1500.0):.2f}"
+
+        if normalized.endswith("_status"):
+            return secrets.choice(["active", "inactive", "degraded", "recovering"])
+
+        if normalized.endswith("_mode"):
+            return secrets.choice(["normal", "fallback", "maintenance"])
+
+        if normalized.endswith("_id") or normalized.endswith("id"):
+            base = re.sub(r"_?id$", "", placeholder).lower()
+            prefix = base or "id"
+            return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+        if normalized.endswith("_name") or normalized.endswith("name"):
+            base = re.sub(r"name$", "", placeholder).strip("_") or "resource"
+            return f"{base.lower()}-{secrets.randbelow(999):03d}"
+
+        if normalized.endswith("_code") or "code" in normalized:
+            return f"{secrets.randbelow(899) + 100}"
+
+        if normalized.endswith("_percentage") or normalized.endswith("_pct"):
+            return str(round(random.uniform(0, 100), 2))
+
+        # Default fallback keeps placeholder readable but unique
+        safe_name = re.sub(r"[^a-z0-9]+", "-", normalized) or "value"
+        return f"{safe_name}-{uuid.uuid4().hex[:6]}"
 
     def _inject_contextual_data_into_log_message(self, message: str, contextual_attrs: Dict[str, Any]) -> str:
         """
@@ -837,7 +912,7 @@ class TelemetryGenerator:
             ]))
 
             # --- Runtime-Specific Metrics ---
-            lang = service.language.lower()
+            lang = self._get_service_language(service)
             if lang == "java":
                 self._runtime_counters[service.name] += random.randint(0, 2)
                 metrics.append(self._create_sum_metric("jvm.gc.collection_count", "collections", True, [
@@ -1167,7 +1242,7 @@ class TelemetryGenerator:
 
         attributes = {
             'net.peer.name': dep.service,
-            'user_agent.original': f"otel-demo-generator/{service.language}"
+            'user_agent.original': f"otel-demo-generator/{self._get_service_language(service)}"
         }
         protocol = (dep.protocol or 'http').lower()
 
