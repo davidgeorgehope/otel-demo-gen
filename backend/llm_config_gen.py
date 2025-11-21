@@ -197,8 +197,9 @@ def _preview_text(text: Optional[str], limit: int = 800) -> str:
 
 SCENARIO_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "required": ["services", "telemetry"],
+    "required": ["title", "services", "telemetry"],
     "properties": {
+        "title": {"type": "string", "description": "Short summary title of the scenario (max 5-7 words)"},
         "services": {
             "type": "array",
             "minItems": 1,
@@ -363,6 +364,7 @@ REQUIREMENTS
 4. Use dependency keys exactly as specified (service, db, cache, queue).
 5. Keep latency objects well-formed and ensure probability defaults to 1.0 if omitted.
 6. Prefer detailed business_data definitions that match the service domain.
+7. Generate a short, descriptive "title" (max 5-7 words) that summarizes the scenario.
 
 EXPECTED JSON SCHEMA:
 {SCENARIO_SCHEMA_TEXT}

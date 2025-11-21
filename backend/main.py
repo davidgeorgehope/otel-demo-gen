@@ -65,6 +65,7 @@ class JobInfo(BaseModel):
     timeout_at: Optional[datetime] = None  # When the job should be automatically stopped
     error_message: Optional[str] = None  # Error details if job failed
     failure_count: int = 0  # Number of consecutive OTLP failures
+    title: Optional[str] = None
 
 # Global job storage and active generators
 active_jobs: Dict[str, JobInfo] = {}
@@ -433,6 +434,7 @@ class JobResponse(BaseModel):
     user: Optional[str] = "Not logged in"
     error_message: Optional[str] = None
     failure_count: int = 0
+    title: Optional[str] = None
 
 class JobListResponse(BaseModel):
     jobs: List[JobResponse]
@@ -469,6 +471,7 @@ class ConfigJobStatusResponse(BaseModel):
     max_attempts: int
     last_error: Optional[str] = None
     user: Optional[str] = "Not logged in"
+    title: Optional[str] = None
 
 class HealthCheckResponse(BaseModel):
     endpoint: str
@@ -526,6 +529,7 @@ async def list_config_jobs():
                 max_attempts=job.max_attempts,
                 last_error=job.last_error,
                 user=job.user,
+                title=job.config.get("title") if job.config else None
             ))
         # Sort by created_at desc
         jobs_list.sort(key=lambda x: x.created_at, reverse=True)
@@ -553,6 +557,7 @@ async def get_config_generation_job(job_id: str):
             max_attempts=job.max_attempts,
             last_error=job.last_error,
             user=job.user,
+            title=job.config.get("title") if job.config else None,
         )
 
     return ConfigJobStatusResponse(**job_data)
@@ -630,6 +635,9 @@ async def start_generation(start_request: StartRequest, request: Request):
         cleaned_config = clean_config_for_validation(start_request.config)
         scenario_config = ScenarioConfig(**cleaned_config)
         
+        # Extract title from config if available
+        title = cleaned_config.get("title")
+        
         # Create and start generator with failure callback
         def failure_callback(error_msg: str):
             handle_generator_failure(job_id, error_msg)
@@ -654,7 +662,8 @@ async def start_generation(start_request: StartRequest, request: Request):
             status="running",
             otlp_endpoint=start_request.otlp_endpoint,
             user=user,
-            timeout_at=timeout_at
+            timeout_at=timeout_at,
+            title=title
         )
         
         active_jobs[job_id] = job_info
@@ -732,7 +741,8 @@ async def list_jobs():
             otlp_endpoint=job.otlp_endpoint,
             user=job.user,
             error_message=job.error_message,
-            failure_count=job.failure_count
+            failure_count=job.failure_count,
+            title=job.title
         )
         for job in active_jobs.values()
     ]
@@ -768,7 +778,8 @@ async def get_job(job_id: str):
         otlp_endpoint=job.otlp_endpoint,
         user=job.user,
         error_message=job.error_message,
-        failure_count=job.failure_count
+        failure_count=job.failure_count,
+        title=job.title
     )
 
 @app.delete("/jobs/{job_id}")

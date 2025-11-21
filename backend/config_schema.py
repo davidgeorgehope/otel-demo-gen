@@ -101,6 +101,7 @@ class Telemetry(BaseModel):
     include_logs: bool = True
 
 class ScenarioConfig(BaseModel):
+    title: Optional[str] = Field(None, description="Short summary title of the scenario (max 5-7 words)")
     services: List[Service]
     databases: Optional[List[Database]] = []
     message_queues: Optional[List[MessageQueue]] = []

@@ -149,7 +149,12 @@ function JobsPage() {
                 <div className="flex justify-between items-start mb-4">
                   <div className="flex-1">
                     <div className="mb-2">
-                      <h3 className="text-lg font-semibold text-white">{job.description}</h3>
+                      <h3 className="text-lg font-semibold text-white">{job.title || job.description}</h3>
+                      {job.title && job.title !== job.description && (
+                        <p className="text-xs text-gray-400 mt-1 line-clamp-2" title={job.description}>
+                          {job.description}
+                        </p>
+                      )}
                     </div>
                     <div className="text-sm text-gray-400 space-y-1">
                       <p><span className="font-medium">Job ID:</span> {job.id}</p>
@@ -313,7 +318,9 @@ function JobsPage() {
                            I should probably add it to the backend response model if I want to show it.
                            For now, I'll just show ID and Status and Dates.
                        */}
-                      <h3 className="text-lg font-semibold text-white">Config Generation {job.job_id.slice(0, 8)}...</h3>
+                      <h3 className="text-lg font-semibold text-white">
+                        {job.title || `Config Generation ${job.job_id.slice(0, 8)}...`}
+                      </h3>
                     </div>
                     <div className="text-sm text-gray-400 space-y-1">
                       <p><span className="font-medium">Job ID:</span> {job.job_id}</p>
