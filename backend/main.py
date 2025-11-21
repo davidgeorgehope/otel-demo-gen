@@ -26,11 +26,11 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="AI-Powered Observability Demo Generator",
     description="An API to generate and control a synthetic telemetry stream based on user-defined scenarios.",
-    version="0.2.0",
+    version="0.2.1",
 )
 
 # Version information
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 
 # Allow CORS for the frontend application
 # Make sure the port matches your frontend's dev server port
