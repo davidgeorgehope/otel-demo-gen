@@ -314,12 +314,16 @@ bump_version() {
     
     log_info "New version: $NEW_VERSION"
     
-    # Update file using sed (macOS compatible)
-    # Update APP_VERSION = "..."
-    sed -i '' "s/APP_VERSION = \"$CURRENT_VERSION\"/APP_VERSION = \"$NEW_VERSION\"/" "$MAIN_PY"
-    
-    # Update version="..." in FastAPI app
-    sed -i '' "s/version=\"$CURRENT_VERSION\"/version=\"$NEW_VERSION\"/" "$MAIN_PY"
+    # Update file using sed (compatible with both macOS and Linux)
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS (BSD sed) requires an empty string for no backup
+        sed -i '' "s/APP_VERSION = \"$CURRENT_VERSION\"/APP_VERSION = \"$NEW_VERSION\"/" "$MAIN_PY"
+        sed -i '' "s/version=\"$CURRENT_VERSION\"/version=\"$NEW_VERSION\"/" "$MAIN_PY"
+    else
+        # Linux (GNU sed) does not support the empty string argument with -i
+        sed -i "s/APP_VERSION = \"$CURRENT_VERSION\"/APP_VERSION = \"$NEW_VERSION\"/" "$MAIN_PY"
+        sed -i "s/version=\"$CURRENT_VERSION\"/version=\"$NEW_VERSION\"/" "$MAIN_PY"
+    fi
     
     log_success "Version bumped to $NEW_VERSION in $MAIN_PY"
 }
