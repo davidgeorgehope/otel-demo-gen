@@ -365,19 +365,76 @@ function JobsPage() {
             <div className="flex justify-end mt-4 gap-3">
               <button
                 onClick={() => {
-                  navigator.clipboard.writeText(JSON.stringify(selectedConfig, null, 2))
-                  // Could add a toast here, but for now just changing text temporarily is enough or just simple action
+                  const textToCopy = JSON.stringify(selectedConfig, null, 2)
                   const btn = document.getElementById('copy-btn')
-                  if (btn) {
-                    const originalText = btn.innerText
-                    btn.innerText = 'Copied!'
-                    btn.classList.remove('bg-blue-600', 'hover:bg-blue-700')
-                    btn.classList.add('bg-green-600', 'hover:bg-green-700')
-                    setTimeout(() => {
-                      btn.innerText = originalText
-                      btn.classList.remove('bg-green-600', 'hover:bg-green-700')
-                      btn.classList.add('bg-blue-600', 'hover:bg-blue-700')
-                    }, 2000)
+
+                  const showSuccess = () => {
+                    if (btn) {
+                      const originalText = btn.innerText
+                      // Only change if not already changed to avoid flickering if clicked fast
+                      if (btn.innerText !== 'Copied!') {
+                        btn.innerText = 'Copied!'
+                        btn.classList.remove('bg-blue-600', 'hover:bg-blue-700')
+                        btn.classList.add('bg-green-600', 'hover:bg-green-700')
+                        setTimeout(() => {
+                          btn.innerText = 'Copy JSON' // Reset to hardcoded text to be safe
+                          btn.classList.remove('bg-green-600', 'hover:bg-green-700')
+                          btn.classList.add('bg-blue-600', 'hover:bg-blue-700')
+                        }, 2000)
+                      }
+                    }
+                  }
+
+                  const showError = (err) => {
+                    console.error('Failed to copy:', err)
+                    if (btn) {
+                      btn.innerText = 'Error!'
+                      btn.classList.add('bg-red-600')
+                      setTimeout(() => {
+                        btn.innerText = 'Copy JSON'
+                        btn.classList.remove('bg-red-600')
+                      }, 2000)
+                    }
+                  }
+
+                  // Try Clipboard API first
+                  if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText(textToCopy)
+                      .then(showSuccess)
+                      .catch((err) => {
+                        // Fallback if API fails
+                        fallbackCopyTextToClipboard(textToCopy)
+                      })
+                  } else {
+                    // Fallback for non-secure contexts
+                    fallbackCopyTextToClipboard(textToCopy)
+                  }
+
+                  function fallbackCopyTextToClipboard(text) {
+                    try {
+                      const textArea = document.createElement("textarea")
+                      textArea.value = text
+
+                      // Ensure it's not visible but part of DOM
+                      textArea.style.position = "fixed"
+                      textArea.style.left = "-9999px"
+                      textArea.style.top = "0"
+                      document.body.appendChild(textArea)
+
+                      textArea.focus()
+                      textArea.select()
+
+                      const successful = document.execCommand('copy')
+                      document.body.removeChild(textArea)
+
+                      if (successful) {
+                        showSuccess()
+                      } else {
+                        showError('execCommand returned false')
+                      }
+                    } catch (err) {
+                      showError(err)
+                    }
                   }
                 }}
                 id="copy-btn"
