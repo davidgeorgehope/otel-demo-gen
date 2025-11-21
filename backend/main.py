@@ -529,7 +529,8 @@ async def list_config_jobs():
             ))
         # Sort by created_at desc
         jobs_list.sort(key=lambda x: x.created_at, reverse=True)
-        return jobs_list
+        # Limit to last 10 jobs
+        return jobs_list[:10]
 
 
 @app.get("/generate-config/{job_id}", response_model=ConfigJobStatusResponse)
@@ -736,7 +737,12 @@ async def list_jobs():
         for job in active_jobs.values()
     ]
     
-    return JobListResponse(jobs=job_responses, total=len(job_responses))
+    job_responses.sort(key=lambda x: x.created_at, reverse=True)
+    
+    # Limit to last 10 jobs
+    job_responses = job_responses[:10]
+    
+    return JobListResponse(jobs=job_responses, total=len(active_jobs))
 
 @app.get("/jobs/{job_id}", response_model=JobResponse)
 async def get_job(job_id: str):
