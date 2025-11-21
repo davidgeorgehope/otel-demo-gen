@@ -162,6 +162,12 @@ function App() {
 
   const handleStartDemo = async () => {
     setError('')
+
+    if (otlpEndpoint && otlpEndpoint.toLowerCase().includes('apm')) {
+      alert("APM Server is not supported for this tool, please use an OpenTelemetry collector")
+      return
+    }
+
     try {
       let parsedConfig = {}
       if (configJson) {
