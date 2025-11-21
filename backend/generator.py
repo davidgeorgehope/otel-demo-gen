@@ -830,6 +830,16 @@ class TelemetryGenerator:
 
                 if span["status"]["code"] == "STATUS_CODE_ERROR":
                     # Generate realistic error log
+                    error_scenarios = [
+                        ("ConnectionTimeoutException", "Connection to database timed out after 5000ms"),
+                        ("ServiceUnavailableException", "Upstream service responded with 503 Unavailable"),
+                        ("NullPointerException", "Attempt to invoke method 'getId()' on null object"),
+                        ("IllegalArgumentException", "Invalid input parameters provided for request"),
+                        ("PaymentProcessingException", "Payment gateway rejected transaction: Insufficient funds"),
+                        ("DatabaseExecutionException", "Query failed: deadlock detected"),
+                    ]
+                    err_type, err_msg = secrets.choice(error_scenarios)
+                    
                     error_message = self._generate_realistic_log_message(service_name, span, is_error=True)
                     error_log = {
                         "timeUnixNano": span["endTimeUnixNano"],
@@ -839,9 +849,9 @@ class TelemetryGenerator:
                         "traceId": span["traceId"],
                         "spanId": span["spanId"],
                         "attributes": self._format_attributes({
-                            "exception.type": "RuntimeException",
-                            "exception.message": "An artificial error occurred",
-                            "exception.stacktrace": "java.lang.RuntimeException: An artificial error occurred\n\tat com.example.Service.process(Service.java:42)\n\tat com.example.Controller.handle(Controller.java:23)"
+                            "exception.type": err_type,
+                            "exception.message": err_msg,
+                            "exception.stacktrace": f"java.lang.{err_type}: {err_msg}\n\tat com.example.Service.process(Service.java:42)\n\tat com.example.Controller.handle(Controller.java:23)"
                         }),
                     }
                     log_records.append(error_log)
@@ -1008,11 +1018,11 @@ class TelemetryGenerator:
     def _generate_span_recursive(
         self,
         service_name: str,
-        parent_span_id: str | None,
+        parent_span_id: Optional[str],
         trace_id: str,
         spans_by_service: Dict[str, List[Dict[str, Any]]],
         start_time_ns: int,
-        error_source: str | None,
+        error_source: Optional[str],
         trigger_kind: str,
         visited_services: set,
         recursion_depth: int,

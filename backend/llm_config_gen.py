@@ -37,7 +37,7 @@ def _get_bedrock_client():
             aws_access_key_id=aws_access_key,
             aws_secret_access_key=aws_secret_key,
             region_name=aws_region,
-            config=Config(read_timeout=300)
+            config=Config(read_timeout=3600)
         )
     return bedrock_client
 
@@ -380,7 +380,14 @@ def generate_config_from_description(description: str, *, max_attempts: int = 3)
     total_attempts = max(1, max_attempts)
 
     for attempt in range(total_attempts):
-        prompt = description if attempt == 0 else _build_retry_prompt(description, last_error, previous_output)
+        # If we've struggled for 3 attempts, go back to square one (fresh prompt)
+        if attempt >= 3:
+            logger.info("Config generation attempt %d/%d: Resetting to square one (fresh prompt)", attempt + 1, total_attempts)
+            prompt = description
+            last_error = None
+            previous_output = None
+        else:
+            prompt = description if attempt == 0 else _build_retry_prompt(description, last_error, previous_output)
 
         raw_response = _call_bedrock(prompt)
         normalized = _normalize_json_text(raw_response)

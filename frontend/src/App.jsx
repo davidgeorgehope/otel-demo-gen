@@ -37,16 +37,9 @@ function App() {
       const statusData = await api.get('/status')
       setIsDemoRunning(statusData.running)
       setCurrentJobId(statusData.job_id)
-      const allowStatusConfigSync =
-        !activeConfigJobRef.current &&
-        (configSourceRef.current === 'status' || configSourceRef.current === 'none')
+      // Auto-sync logic removed to prevent global state leakage into editor
+      // const allowStatusConfigSync = ...
 
-      if (statusData.running && statusData.config && allowStatusConfigSync) {
-        updateConfigJson(JSON.stringify(statusData.config, null, 2), 'status')
-      } else if (!statusData.running && configSourceRef.current === 'status') {
-        updateConfigJson('', 'none')
-      }
-      
       // If we have a job ID, get detailed job info for error handling
       if (statusData.job_id) {
         try {
@@ -69,16 +62,16 @@ function App() {
   useEffect(() => {
     // Check status on mount
     checkStatus()
-    
+
     // Check status every 5 seconds to stay in sync
     const interval = setInterval(checkStatus, 5000)
-    
+
     return () => clearInterval(interval)
   }, [])
 
   const pollConfigGenerationJob = async (jobId) => {
     const pollIntervalMs = 2000
-    const maxWaitMs = 300000 // 5 minutes timeout for config generation
+    const maxWaitMs = 3600000 // 1 hour timeout for config generation
     let elapsedMs = 0
 
     while (true) {
@@ -222,7 +215,7 @@ function App() {
             configJobStatus={configJobStatus}
           />
           {configJson && (
-             <Controls
+            <Controls
               otlpEndpoint={otlpEndpoint}
               setOtlpEndpoint={setOtlpEndpoint}
               apiKey={apiKey}
@@ -259,32 +252,30 @@ function App() {
               setActiveTab('create')
               // Refresh status when switching back to create tab
               setTimeout(checkStatus, 100)
+              setError('')
             }}
-            className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
-              activeTab === 'create'
-                ? 'bg-blue-600 text-white'
-                : 'text-gray-300 hover:text-white hover:bg-gray-700'
-            }`}
+            className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${activeTab === 'create'
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-300 hover:text-white hover:bg-gray-700'
+              }`}
           >
             Create New Job
           </button>
           <button
             onClick={() => setActiveTab('jobs')}
-            className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
-              activeTab === 'jobs'
-                ? 'bg-blue-600 text-white'
-                : 'text-gray-300 hover:text-white hover:bg-gray-700'
-            }`}
+            className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${activeTab === 'jobs'
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-300 hover:text-white hover:bg-gray-700'
+              }`}
           >
             Manage Jobs
           </button>
           <button
             onClick={() => setActiveTab('scenarios')}
-            className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${
-              activeTab === 'scenarios'
-                ? 'bg-blue-600 text-white'
-                : 'text-gray-300 hover:text-white hover:bg-gray-700'
-            }`}
+            className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-colors ${activeTab === 'scenarios'
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-300 hover:text-white hover:bg-gray-700'
+              }`}
           >
             Simulate Outages
           </button>
@@ -292,9 +283,9 @@ function App() {
 
         {renderTabContent()}
 
-        <StatusBar 
-          error={error} 
-          isDemoRunning={isDemoRunning} 
+        <StatusBar
+          error={error}
+          isDemoRunning={isDemoRunning}
           currentJobId={currentJobId}
           jobStatus={currentJobStatus}
           jobError={currentJobError}

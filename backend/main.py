@@ -26,8 +26,11 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="AI-Powered Observability Demo Generator",
     description="An API to generate and control a synthetic telemetry stream based on user-defined scenarios.",
-    version="0.1.0",
+    version="0.2.0",
 )
+
+# Version information
+APP_VERSION = "0.2.0"
 
 # Allow CORS for the frontend application
 # Make sure the port matches your frontend's dev server port
@@ -491,6 +494,35 @@ async def request_config_generation(request: GenerateRequest):
     config_job_queue.put(job_id)
 
     return GenerateConfigJobResponse(job_id=job_id, status=job.status, max_attempts=job.max_attempts)
+
+
+@app.get("/version", response_model=dict)
+async def get_version():
+    """Return the current application version."""
+    return {"version": APP_VERSION}
+
+
+@app.get("/config-jobs", response_model=List[ConfigJobStatusResponse])
+async def list_config_jobs():
+    """List all config generation jobs."""
+    with config_jobs_lock:
+        jobs_list = []
+        for job in config_jobs.values():
+            jobs_list.append(ConfigJobStatusResponse(
+                job_id=job.id,
+                status=job.status,
+                config_json=job.config_json,
+                config=job.config,
+                error_message=job.error_message,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+                attempts=job.attempts,
+                max_attempts=job.max_attempts,
+                last_error=job.last_error,
+            ))
+        # Sort by created_at desc
+        jobs_list.sort(key=lambda x: x.created_at, reverse=True)
+        return jobs_list
 
 
 @app.get("/generate-config/{job_id}", response_model=ConfigJobStatusResponse)
