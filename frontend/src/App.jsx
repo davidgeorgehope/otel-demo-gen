@@ -23,8 +23,10 @@ function App() {
   const [currentJobError, setCurrentJobError] = useState(null)
   const [configJobId, setConfigJobId] = useState(null)
   const [configJobStatus, setConfigJobStatus] = useState(null)
+  const configJobStatusRef = useRef(null) // Not used but keeping structure
   const activeConfigJobRef = useRef(null)
   const configSourceRef = useRef('none')
+  const initialLoadRef = useRef(true)
 
   const updateConfigJson = (value, source = 'manual') => {
     configSourceRef.current = source
@@ -45,7 +47,16 @@ function App() {
         try {
           const jobData = await api.get(`/jobs/${statusData.job_id}`)
           setCurrentJobStatus(jobData.status)
-          setCurrentJobError(jobData.error_message)
+
+          // Only show error if it occurs during the session, not if we load into a failed state
+          // This prevents the error dialog from persisting across sessions/refreshes
+          if (jobData.status === 'failed') {
+            if (!initialLoadRef.current) {
+              setCurrentJobError(jobData.error_message)
+            }
+          } else {
+            setCurrentJobError(null)
+          }
         } catch (jobError) {
           console.debug('Job status check failed:', jobError.message)
         }
@@ -53,6 +64,8 @@ function App() {
         setCurrentJobStatus(null)
         setCurrentJobError(null)
       }
+
+      initialLoadRef.current = false
     } catch (error) {
       // Silently handle error - status endpoint might not be available
       console.debug('Status check failed:', error.message)
