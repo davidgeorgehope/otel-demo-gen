@@ -83,9 +83,17 @@ build_images() {
     TIMESTAMP=$(date +%Y%m%d-%H%M%S)
     VERSION_TAG="$TIMESTAMP-$GIT_HASH"
     
+    # Generate build date
+    BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    log_info "Build date: $BUILD_DATE"
+    
     # Build backend image
     log_info "Building backend image..."
-    docker build -t "$BACKEND_IMAGE:latest" -t "$BACKEND_IMAGE:$VERSION_TAG" "$PROJECT_ROOT/backend"
+    docker build \
+        --build-arg BUILD_DATE="$BUILD_DATE" \
+        -t "$BACKEND_IMAGE:latest" \
+        -t "$BACKEND_IMAGE:$VERSION_TAG" \
+        "$PROJECT_ROOT/backend"
     
     # Build frontend image
     log_info "Building frontend image..."
@@ -281,52 +289,7 @@ cleanup_deployment() {
     log_success "Deployment cleanup completed"
 }
 
-# Function to bump version
-bump_version() {
-    log_info "Bumping application version..."
-    
-    MAIN_PY="$PROJECT_ROOT/backend/main.py"
-    
-    if [ ! -f "$MAIN_PY" ]; then
-        log_error "File not found: $MAIN_PY"
-        exit 1
-    fi
-    
-    # Extract current version
-    CURRENT_VERSION=$(grep 'APP_VERSION =' "$MAIN_PY" | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
-    
-    if [ -z "$CURRENT_VERSION" ]; then
-        log_error "Could not find APP_VERSION in $MAIN_PY"
-        exit 1
-    fi
-    
-    log_info "Current version: $CURRENT_VERSION"
-    
-    # Split version into array
-    IFS='.' read -r -a VERSION_PARTS <<< "$CURRENT_VERSION"
-    MAJOR="${VERSION_PARTS[0]}"
-    MINOR="${VERSION_PARTS[1]}"
-    PATCH="${VERSION_PARTS[2]}"
-    
-    # Increment patch
-    NEW_PATCH=$((PATCH + 1))
-    NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
-    
-    log_info "New version: $NEW_VERSION"
-    
-    # Update file using sed (compatible with both macOS and Linux)
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        # macOS (BSD sed) requires an empty string for no backup
-        sed -i '' "s/APP_VERSION = \"$CURRENT_VERSION\"/APP_VERSION = \"$NEW_VERSION\"/" "$MAIN_PY"
-        sed -i '' "s/version=\"$CURRENT_VERSION\"/version=\"$NEW_VERSION\"/" "$MAIN_PY"
-    else
-        # Linux (GNU sed) does not support the empty string argument with -i
-        sed -i "s/APP_VERSION = \"$CURRENT_VERSION\"/APP_VERSION = \"$NEW_VERSION\"/" "$MAIN_PY"
-        sed -i "s/version=\"$CURRENT_VERSION\"/version=\"$NEW_VERSION\"/" "$MAIN_PY"
-    fi
-    
-    log_success "Version bumped to $NEW_VERSION in $MAIN_PY"
-}
+
 
 # Function to show help
 show_help() {
@@ -342,7 +305,6 @@ End-to-end Kubernetes deployment script for OTEL Demo Generator
      k8s             Deploy to Kubernetes only (requires images in registry)
      status          Show deployment status and external IPs
      port-forward    Setup port forwarding (fallback for non-LoadBalancer)
-     bump            Bump application patch version (e.g. 0.2.0 -> 0.2.1)
      cleanup         Remove deployment from Kubernetes
      help            Show this help message
 
@@ -354,7 +316,6 @@ EXAMPLES:
     $0 k8s                # Deploy to k8s only
     $0 status             # Show deployment status
     $0 port-forward       # Setup port forwarding
-    $0 bump               # Bump version
     $0 cleanup            # Remove deployment
 
  PREREQUISITES:
@@ -378,7 +339,6 @@ main() {
     case $action in
                  deploy)
              check_prerequisites
-             bump_version  # Auto-bump version
              check_docker_login
              check_k8s_connection
              build_images
@@ -410,9 +370,6 @@ main() {
             check_prerequisites
             check_k8s_connection
             setup_port_forwarding
-            ;;
-        bump)
-            bump_version
             ;;
         cleanup)
             check_prerequisites

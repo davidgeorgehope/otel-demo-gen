@@ -4,6 +4,10 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# Build-time variables
+ARG BUILD_DATE=unknown
+ENV APP_VERSION=$BUILD_DATE
+
 # Set work directory
 WORKDIR /app
 

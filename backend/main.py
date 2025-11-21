@@ -26,11 +26,12 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="AI-Powered Observability Demo Generator",
     description="An API to generate and control a synthetic telemetry stream based on user-defined scenarios.",
-    version="0.2.1",
+    version=os.getenv("APP_VERSION", "dev"),
 )
 
 # Version information
-APP_VERSION = "0.2.1"
+# Version information
+APP_VERSION = os.getenv("APP_VERSION", "dev")
 
 # Allow CORS for the frontend application
 # Make sure the port matches your frontend's dev server port
@@ -91,6 +92,7 @@ class ConfigGenerationJob:
     max_attempts: int = 1
     last_error: Optional[str] = None
     last_response: Optional[str] = None
+    user: Optional[str] = "Not logged in"
 
 
 config_jobs: Dict[str, ConfigGenerationJob] = {}
@@ -466,6 +468,7 @@ class ConfigJobStatusResponse(BaseModel):
     attempts: int
     max_attempts: int
     last_error: Optional[str] = None
+    user: Optional[str] = "Not logged in"
 
 class HealthCheckResponse(BaseModel):
     endpoint: str
@@ -475,17 +478,20 @@ class HealthCheckResponse(BaseModel):
 
 
 @app.post("/generate-config", response_model=GenerateConfigJobResponse, status_code=202)
-async def request_config_generation(request: GenerateRequest):
+async def request_config_generation(request: GenerateRequest, req: Request):
     """Create an asynchronous config generation job and return its identifier."""
     description = request.description.strip()
     if not description:
         raise HTTPException(status_code=400, detail="Description must not be empty.")
+
+    user = get_user_from_request(req)
 
     job_id = str(uuid.uuid4())
     job = ConfigGenerationJob(
         id=job_id,
         description=description,
         max_attempts=max(1, MAX_CONFIG_GENERATION_ATTEMPTS),
+        user=user,
     )
 
     with config_jobs_lock:
@@ -519,6 +525,7 @@ async def list_config_jobs():
                 attempts=job.attempts,
                 max_attempts=job.max_attempts,
                 last_error=job.last_error,
+                user=job.user,
             ))
         # Sort by created_at desc
         jobs_list.sort(key=lambda x: x.created_at, reverse=True)
@@ -544,6 +551,7 @@ async def get_config_generation_job(job_id: str):
             attempts=job.attempts,
             max_attempts=job.max_attempts,
             last_error=job.last_error,
+            user=job.user,
         )
 
     return ConfigJobStatusResponse(**job_data)

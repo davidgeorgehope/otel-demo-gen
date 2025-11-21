@@ -317,6 +317,7 @@ function JobsPage() {
                     </div>
                     <div className="text-sm text-gray-400 space-y-1">
                       <p><span className="font-medium">Job ID:</span> {job.job_id}</p>
+                      <p><span className="font-medium">User:</span> {job.user || 'Not logged in'}</p>
                       <p><span className="font-medium">Created:</span> {formatDate(job.created_at)}</p>
                       <p><span className="font-medium">Attempts:</span> {job.attempts} / {job.max_attempts}</p>
                       {job.error_message && (
