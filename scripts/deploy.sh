@@ -374,6 +374,7 @@ main() {
     case $action in
                  deploy)
              check_prerequisites
+             bump_version  # Auto-bump version
              check_docker_login
              check_k8s_connection
              build_images
