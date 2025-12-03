@@ -61,6 +61,8 @@ class JobInfo(BaseModel):
     config: dict
     status: str = "running"  # "running", "stopped", "failed"
     otlp_endpoint: Optional[str] = None
+    api_key: Optional[str] = None  # Store API key for restarts
+    auth_type: str = "ApiKey"  # Store auth type for restarts
     user: Optional[str] = "Not logged in"
     timeout_at: Optional[datetime] = None  # When the job should be automatically stopped
     error_message: Optional[str] = None  # Error details if job failed
@@ -661,6 +663,8 @@ async def start_generation(start_request: StartRequest, request: Request):
             config=cleaned_config,
             status="running",
             otlp_endpoint=start_request.otlp_endpoint,
+            api_key=start_request.api_key,
+            auth_type=start_request.auth_type,
             user=user,
             timeout_at=timeout_at,
             title=title
@@ -825,8 +829,8 @@ async def restart_job(job_id: str, restart_request: Optional[RestartRequest] = N
         # Use new config if provided, otherwise use original
         config_to_use = restart_request.config if restart_request and restart_request.config else job_info.config
         otlp_endpoint_to_use = restart_request.otlp_endpoint if restart_request and restart_request.otlp_endpoint else job_info.otlp_endpoint
-        api_key_to_use = restart_request.api_key if restart_request and restart_request.api_key else None
-        auth_type_to_use = restart_request.auth_type if restart_request and restart_request.auth_type else "ApiKey"
+        api_key_to_use = restart_request.api_key if restart_request and restart_request.api_key else job_info.api_key
+        auth_type_to_use = restart_request.auth_type if restart_request and restart_request.auth_type else job_info.auth_type
         description_to_use = restart_request.description if restart_request and restart_request.description else job_info.description
 
         # Clean and validate configuration
@@ -848,6 +852,8 @@ async def restart_job(job_id: str, restart_request: Optional[RestartRequest] = N
         # Update job info with new values - reset error state on restart
         job_info.config = cleaned_config
         job_info.otlp_endpoint = otlp_endpoint_to_use
+        job_info.api_key = api_key_to_use
+        job_info.auth_type = auth_type_to_use
         job_info.description = description_to_use
         job_info.status = "running"
         job_info.user = user  # Update user in case it changed
