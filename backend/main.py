@@ -15,10 +15,15 @@ import queue
 import logging
 from dataclasses import dataclass, field
 
-from config_schema import GenerateConfigRequest, StartDemoRequest, ScenarioConfig, ScenarioGenerationRequest, ScenarioApplyRequest, ActiveScenario, ScenarioModification
+from config_schema import (
+    GenerateConfigRequest, StartDemoRequest, ScenarioConfig,
+    ScenarioGenerationRequest, ScenarioApplyRequest, ActiveScenario, ScenarioModification,
+    CascadingOutageRequest, CascadingOutageConfig, CascadeStage, IncidentCorrelation
+)
 from generator import TelemetryGenerator
 from llm_config_gen import generate_config_from_description
 from scenario_llm_gen import generate_scenario_from_description, get_predefined_templates
+from correlation_manager import CorrelationManager
 
 
 logger = logging.getLogger(__name__)
@@ -43,15 +48,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def _parse_int_env(name: str, default: int, min_val: int = 1) -> int:
+    """Safely parse an integer environment variable with validation."""
+    raw = os.getenv(name, str(default))
+    try:
+        val = int(raw)
+        if val < min_val:
+            logger.warning(f"Environment variable {name}={val} below minimum {min_val}, using {min_val}")
+            return min_val
+        return val
+    except ValueError:
+        logger.warning(f"Invalid value for {name}: '{raw}', using default {default}")
+        return default
+
+
 # Job Management Configuration - Environment configurable with sensible defaults
-MAX_ACTIVE_JOBS = int(os.getenv("MAX_ACTIVE_JOBS", "50"))  # Maximum total active jobs
-MAX_JOBS_PER_USER = int(os.getenv("MAX_JOBS_PER_USER", "3"))  # Maximum jobs per user
-MAX_JOB_DURATION_HOURS = int(os.getenv("MAX_JOB_DURATION_HOURS", "24"))  # Maximum job runtime
-JOB_CLEANUP_HOURS = int(os.getenv("JOB_CLEANUP_HOURS", "24"))  # How long to keep stopped jobs
-CLEANUP_INTERVAL_MINUTES = int(os.getenv("CLEANUP_INTERVAL_MINUTES", "15"))  # Cleanup frequency
-CONFIG_JOB_TTL_MINUTES = int(os.getenv("CONFIG_JOB_TTL_MINUTES", "60"))  # Retain finished config jobs
-CONFIG_GENERATION_WORKERS = int(os.getenv("CONFIG_GENERATION_WORKERS", "1"))  # Background workers
-MAX_CONFIG_GENERATION_ATTEMPTS = int(os.getenv("CONFIG_GENERATION_MAX_ATTEMPTS", "3"))  # Total attempts per job
+MAX_ACTIVE_JOBS = _parse_int_env("MAX_ACTIVE_JOBS", 50)  # Maximum total active jobs
+MAX_JOBS_PER_USER = _parse_int_env("MAX_JOBS_PER_USER", 3)  # Maximum jobs per user
+MAX_JOB_DURATION_HOURS = _parse_int_env("MAX_JOB_DURATION_HOURS", 24)  # Maximum job runtime
+JOB_CLEANUP_HOURS = _parse_int_env("JOB_CLEANUP_HOURS", 24)  # How long to keep stopped jobs
+CLEANUP_INTERVAL_MINUTES = _parse_int_env("CLEANUP_INTERVAL_MINUTES", 15)  # Cleanup frequency
+CONFIG_JOB_TTL_MINUTES = _parse_int_env("CONFIG_JOB_TTL_MINUTES", 60)  # Retain finished config jobs
+CONFIG_GENERATION_WORKERS = _parse_int_env("CONFIG_GENERATION_WORKERS", 1)  # Background workers
+MAX_CONFIG_GENERATION_ATTEMPTS = _parse_int_env("CONFIG_GENERATION_MAX_ATTEMPTS", 3)  # Total attempts per job
 
 # Job management system - replace global singleton with multi-job support
 class JobInfo(BaseModel):
@@ -72,6 +91,11 @@ class JobInfo(BaseModel):
 # Global job storage and active generators
 active_jobs: Dict[str, JobInfo] = {}
 active_generators: Dict[str, TelemetryGenerator] = {}
+
+# Thread safety locks for global state
+jobs_lock = threading.RLock()  # RLock allows same thread to acquire multiple times
+generators_lock = threading.RLock()
+scenarios_lock = threading.RLock()
 
 # Global scenario storage
 active_scenarios: Dict[str, ActiveScenario] = {}  # scenario_id -> ActiveScenario
@@ -283,7 +307,7 @@ def start_config_generation_workers():
         worker = threading.Thread(target=config_generation_worker, daemon=True)
         config_worker_threads.append(worker)
         worker.start()
-    print(f"Started {len(config_worker_threads)} config generation worker(s)")
+    logger.info(f"Started {len(config_worker_threads)} config generation worker(s)")
 
 
 def stop_config_generation_workers():
@@ -294,18 +318,20 @@ def stop_config_generation_workers():
     for worker in config_worker_threads:
         worker.join(timeout=5)
     config_worker_threads.clear()
-    print("Stopped config generation workers")
+    logger.info("Stopped config generation workers")
 
 
 def handle_generator_failure(job_id: str, error_message: str):
     """Callback function to handle generator failures and update job status."""
-    if job_id in active_jobs:
-        print(f"🚨 Job {job_id} failed: {error_message}")
-        active_jobs[job_id].status = "failed"
-        active_jobs[job_id].error_message = error_message
-        active_jobs[job_id].failure_count += 1
-        
-        # Remove from active generators since it's failed
+    with jobs_lock:
+        if job_id in active_jobs:
+            logger.error(f"Job {job_id} failed: {error_message}")
+            active_jobs[job_id].status = "failed"
+            active_jobs[job_id].error_message = error_message
+            active_jobs[job_id].failure_count += 1
+
+    # Remove from active generators since it's failed
+    with generators_lock:
         if job_id in active_generators:
             del active_generators[job_id]
 
@@ -315,54 +341,63 @@ def get_user_from_request(request: Request) -> str:
 
 def count_user_jobs(user: str, status_filter: Optional[str] = None) -> int:
     """Count jobs for a specific user, optionally filtered by status."""
-    count = 0
-    for job in active_jobs.values():
-        if job.user == user:
-            if status_filter is None or job.status == status_filter:
-                count += 1
-    return count
+    with jobs_lock:
+        count = 0
+        for job in active_jobs.values():
+            if job.user == user:
+                if status_filter is None or job.status == status_filter:
+                    count += 1
+        return count
 
 def count_active_jobs() -> int:
     """Count currently active (running) jobs."""
-    return len([job for job in active_jobs.values() if job.status == "running"])
+    with jobs_lock:
+        return len([job for job in active_jobs.values() if job.status == "running"])
 
 def cleanup_old_jobs():
     """Remove old stopped jobs and timeout long-running jobs."""
     current_time = datetime.now()
     cutoff_time = current_time - timedelta(hours=JOB_CLEANUP_HOURS)
-    
+
     jobs_to_remove = []
     jobs_to_timeout = []
-    
-    for job_id, job in active_jobs.items():
-        # Remove old stopped jobs
-        if job.status == "stopped" and job.created_at < cutoff_time:
-            jobs_to_remove.append(job_id)
-        
-        # Timeout long-running jobs
-        elif (job.status == "running" and 
-              job.timeout_at and 
-              current_time > job.timeout_at):
-            jobs_to_timeout.append(job_id)
-    
-    # Remove old stopped jobs
-    for job_id in jobs_to_remove:
-        print(f"Cleaning up old stopped job: {job_id}")
-        del active_jobs[job_id]
-    
+
+    # Collect jobs to process while holding lock
+    with jobs_lock:
+        for job_id, job in active_jobs.items():
+            # Remove old stopped jobs
+            if job.status == "stopped" and job.created_at < cutoff_time:
+                jobs_to_remove.append(job_id)
+
+            # Timeout long-running jobs
+            elif (job.status == "running" and
+                  job.timeout_at and
+                  current_time > job.timeout_at):
+                jobs_to_timeout.append(job_id)
+
+    # Remove old stopped jobs (with lock)
+    with jobs_lock:
+        for job_id in jobs_to_remove:
+            if job_id in active_jobs:
+                logger.info(f"Cleaning up old stopped job: {job_id}")
+                del active_jobs[job_id]
+
     # Timeout long-running jobs
     for job_id in jobs_to_timeout:
-        print(f"Timing out long-running job: {job_id}")
+        logger.info(f"Timing out long-running job: {job_id}")
         try:
-            if job_id in active_generators:
-                generator = active_generators[job_id]
-                generator.stop()
-                del active_generators[job_id]
-            
-            active_jobs[job_id].status = "stopped"
-            print(f"Job {job_id} stopped due to timeout")
+            with generators_lock:
+                if job_id in active_generators:
+                    generator = active_generators[job_id]
+                    generator.stop()
+                    del active_generators[job_id]
+
+            with jobs_lock:
+                if job_id in active_jobs:
+                    active_jobs[job_id].status = "stopped"
+                    logger.info(f"Job {job_id} stopped due to timeout")
         except Exception as e:
-            print(f"Error stopping timed-out job {job_id}: {e}")
+            logger.error(f"Error stopping timed-out job {job_id}: {e}")
 
     cleanup_config_jobs(current_time)
 
@@ -380,7 +415,7 @@ def cleanup_config_jobs(current_time: Optional[datetime] = None):
 
         for job_id in expired_jobs:
             del config_jobs[job_id]
-            print(f"Cleaned up config generation job: {job_id}")
+            logger.info(f"Cleaned up config generation job: {job_id}")
 
 
 def cleanup_worker():
@@ -389,7 +424,7 @@ def cleanup_worker():
         try:
             cleanup_old_jobs()
         except Exception as e:
-            print(f"Error during cleanup: {e}")
+            logger.error(f"Error during cleanup: {e}")
         
         # Wait for the cleanup interval or until stop event is set
         cleanup_stop_event.wait(timeout=CLEANUP_INTERVAL_MINUTES * 60)
@@ -401,7 +436,7 @@ def start_cleanup_worker():
         cleanup_stop_event.clear()
         cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
         cleanup_thread.start()
-        print(f"Started cleanup worker (interval: {CLEANUP_INTERVAL_MINUTES} minutes)")
+        logger.info(f"Started cleanup worker (interval: {CLEANUP_INTERVAL_MINUTES} minutes)")
 
 def stop_cleanup_worker():
     """Stop the background cleanup worker."""
@@ -409,7 +444,7 @@ def stop_cleanup_worker():
     if cleanup_thread and cleanup_thread.is_alive():
         cleanup_stop_event.set()
         cleanup_thread.join(timeout=5)
-        print("Stopped cleanup worker")
+        logger.info("Stopped cleanup worker")
 
 # Start cleanup worker on application startup
 start_cleanup_worker()
@@ -482,6 +517,40 @@ class HealthCheckResponse(BaseModel):
     error: Optional[str] = None
 
 
+class ErrorDetail(BaseModel):
+    """Standardized error response structure."""
+    detail: str
+    code: Optional[str] = None
+    timestamp: datetime = None
+
+    def __init__(self, **data):
+        if 'timestamp' not in data or data['timestamp'] is None:
+            data['timestamp'] = datetime.utcnow()
+        super().__init__(**data)
+
+
+class VersionResponse(BaseModel):
+    """Version information response."""
+    version: str
+
+
+class LLMConfigDetails(BaseModel):
+    """LLM configuration details."""
+    aws_access_key_set: Optional[bool] = None
+    aws_secret_key_set: Optional[bool] = None
+    aws_region: Optional[str] = None
+    model_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+class LLMConfigResponse(BaseModel):
+    """LLM configuration status response."""
+    provider: str
+    configured: bool
+    model: Optional[str] = None
+    details: LLMConfigDetails = LLMConfigDetails()
+
+
 @app.post("/generate-config", response_model=GenerateConfigJobResponse, status_code=202)
 async def request_config_generation(request: GenerateRequest, req: Request):
     """Create an asynchronous config generation job and return its identifier."""
@@ -507,10 +576,10 @@ async def request_config_generation(request: GenerateRequest, req: Request):
     return GenerateConfigJobResponse(job_id=job_id, status=job.status, max_attempts=job.max_attempts)
 
 
-@app.get("/version", response_model=dict)
+@app.get("/version", response_model=VersionResponse)
 async def get_version():
     """Return the current application version."""
-    return {"version": APP_VERSION}
+    return VersionResponse(version=APP_VERSION)
 
 
 @app.get("/config-jobs", response_model=List[ConfigJobStatusResponse])
@@ -670,9 +739,11 @@ async def start_generation(start_request: StartRequest, request: Request):
             title=title
         )
         
-        active_jobs[job_id] = job_info
-        active_generators[job_id] = generator
-        
+        with jobs_lock:
+            active_jobs[job_id] = job_info
+        with generators_lock:
+            active_generators[job_id] = generator
+
         # Start the generator
         generator.start()
         
@@ -702,25 +773,33 @@ async def stop_generation(job_id: str):
     """
     Stops a specific telemetry generator job.
     """
-    if job_id not in active_jobs:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
-    if job_id not in active_generators:
-        raise HTTPException(status_code=400, detail=f"Job {job_id} is not running")
-    
+    with jobs_lock:
+        if job_id not in active_jobs:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    with generators_lock:
+        if job_id not in active_generators:
+            raise HTTPException(status_code=400, detail=f"Job {job_id} is not running")
+
     try:
-        # Stop the generator
-        generator = active_generators[job_id]
+        # Get generator reference while holding lock
+        with generators_lock:
+            generator = active_generators[job_id]
+
+        # Stop the generator (outside lock to avoid blocking)
         generator.stop()
-        
+
         # Update job status
-        active_jobs[job_id].status = "stopped"
-        
+        with jobs_lock:
+            active_jobs[job_id].status = "stopped"
+
         # Remove from active generators
-        del active_generators[job_id]
-        
+        with generators_lock:
+            if job_id in active_generators:
+                del active_generators[job_id]
+
         return {"status": "stopped", "job_id": job_id}
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to stop generator: {e}")
 
@@ -730,33 +809,50 @@ async def list_jobs():
     Returns a list of all jobs (running and stopped).
     """
     # Update status for any generators that may have stopped
-    for job_id, generator in list(active_generators.items()):
+    with generators_lock:
+        generators_copy = list(active_generators.items())
+
+    stopped_job_ids = []
+    for job_id, generator in generators_copy:
         if not generator.is_running():
-            active_jobs[job_id].status = "stopped"
-            del active_generators[job_id]
-    
-    job_responses = [
-        JobResponse(
-            id=job.id,
-            description=job.description,
-            created_at=job.created_at,
-            config=job.config,
-            status=job.status,
-            otlp_endpoint=job.otlp_endpoint,
-            user=job.user,
-            error_message=job.error_message,
-            failure_count=job.failure_count,
-            title=job.title
-        )
-        for job in active_jobs.values()
-    ]
-    
+            stopped_job_ids.append(job_id)
+
+    # Update stopped jobs
+    with jobs_lock:
+        for job_id in stopped_job_ids:
+            if job_id in active_jobs:
+                active_jobs[job_id].status = "stopped"
+
+    with generators_lock:
+        for job_id in stopped_job_ids:
+            if job_id in active_generators:
+                del active_generators[job_id]
+
+    # Build response while holding lock
+    with jobs_lock:
+        job_responses = [
+            JobResponse(
+                id=job.id,
+                description=job.description,
+                created_at=job.created_at,
+                config=job.config,
+                status=job.status,
+                otlp_endpoint=job.otlp_endpoint,
+                user=job.user,
+                error_message=job.error_message,
+                failure_count=job.failure_count,
+                title=job.title
+            )
+            for job in active_jobs.values()
+        ]
+        total_jobs = len(active_jobs)
+
     job_responses.sort(key=lambda x: x.created_at, reverse=True)
-    
+
     # Limit to last 10 jobs
     job_responses = job_responses[:10]
-    
-    return JobListResponse(jobs=job_responses, total=len(active_jobs))
+
+    return JobListResponse(jobs=job_responses, total=total_jobs)
 
 @app.get("/jobs/{job_id}", response_model=JobResponse)
 async def get_job(job_id: str):
@@ -791,18 +887,25 @@ async def delete_job(job_id: str):
     """
     Deletes a job from the system. Stops it first if it's running.
     """
-    if job_id not in active_jobs:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
+    with jobs_lock:
+        if job_id not in active_jobs:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
     # Stop the job if it's running
-    if job_id in active_generators:
-        generator = active_generators[job_id]
+    generator = None
+    with generators_lock:
+        if job_id in active_generators:
+            generator = active_generators[job_id]
+            del active_generators[job_id]
+
+    if generator:
         generator.stop()
-        del active_generators[job_id]
-    
+
     # Remove from jobs
-    del active_jobs[job_id]
-    
+    with jobs_lock:
+        if job_id in active_jobs:
+            del active_jobs[job_id]
+
     return {"status": "deleted", "job_id": job_id}
 
 @app.post("/restart/{job_id}")
@@ -1002,41 +1105,39 @@ async def get_test_config():
 
     return {"config_json": config_json_str, "config": test_config}
 
-@app.get("/llm-config", response_model=dict)
+@app.get("/llm-config", response_model=LLMConfigResponse)
 async def get_llm_config():
     """
     Returns information about the current LLM provider configuration.
     """
     provider = os.getenv("LLM_PROVIDER", "bedrock").lower()
 
-    config_status = {
-        "provider": provider,
-        "configured": False,
-        "model": None,
-        "details": {}
-    }
-
     if provider != "bedrock":
-        config_status["details"]["error"] = (
-            "Unsupported provider configured. Set LLM_PROVIDER=bedrock and supply AWS credentials."
+        return LLMConfigResponse(
+            provider=provider,
+            configured=False,
+            model=None,
+            details=LLMConfigDetails(
+                error="Unsupported provider configured. Set LLM_PROVIDER=bedrock and supply AWS credentials."
+            )
         )
-        return config_status
 
     aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
     aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
     aws_region = os.getenv("AWS_REGION", "us-east-1")
     model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0")
 
-    config_status["configured"] = bool(aws_access_key and aws_secret_key)
-    config_status["model"] = model_id
-    config_status["details"] = {
-        "aws_access_key_set": bool(aws_access_key),
-        "aws_secret_key_set": bool(aws_secret_key),
-        "aws_region": aws_region,
-        "model_id": model_id
-    }
-    
-    return config_status
+    return LLMConfigResponse(
+        provider=provider,
+        configured=bool(aws_access_key and aws_secret_key),
+        model=model_id,
+        details=LLMConfigDetails(
+            aws_access_key_set=bool(aws_access_key),
+            aws_secret_key_set=bool(aws_secret_key),
+            aws_region=aws_region,
+            model_id=model_id
+        )
+    )
 
 @app.get("/limits", summary="Get current job limits and usage")
 async def get_limits():
@@ -1393,3 +1494,155 @@ async def get_scenario_templates():
         "templates": templates,
         "total": len(templates)
     }
+
+
+# --- Cascading Outage and Incident Endpoints ---
+
+@app.post("/incidents/cascade/{job_id}", summary="Start cascading outage simulation")
+async def start_cascading_outage(job_id: str, request: CascadingOutageRequest):
+    """
+    Starts a cascading outage that propagates from infrastructure to applications
+    or vice versa, with proper correlation across all signals.
+    """
+    # Validate job exists and is running
+    if job_id not in active_jobs:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    if job_id not in active_generators:
+        raise HTTPException(status_code=400, detail=f"Job {job_id} is not running")
+
+    generator = active_generators[job_id]
+    correlation_manager = generator.get_correlation_manager()
+
+    try:
+        # Get cascade configuration
+        cascade_config = None
+
+        if request.outage_config:
+            cascade_config = request.outage_config
+        elif request.template_name:
+            # Find template from predefined templates
+            templates = get_predefined_templates()
+            template = next(
+                (t for t in templates if t.get("name") == request.template_name and "cascade_config" in t),
+                None
+            )
+            if not template:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Cascade template '{request.template_name}' not found"
+                )
+            cascade_config = CascadingOutageConfig(**template["cascade_config"])
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Must provide either outage_config or template_name"
+            )
+
+        # Start the incident in correlation manager
+        incident_id = correlation_manager.start_incident(
+            job_id=job_id,
+            root_cause_type=cascade_config.origin,
+            root_cause_component=cascade_config.trigger_component,
+            cascade_config=cascade_config,
+            severity="high",
+            description=cascade_config.description
+        )
+
+        # Start background task to advance cascade stages
+        async def advance_cascade():
+            for stage in cascade_config.cascade_chain:
+                await asyncio.sleep(stage.delay_ms / 1000.0)
+                if job_id not in active_generators:
+                    break
+                correlation_manager.advance_cascade(incident_id)
+
+        asyncio.create_task(advance_cascade())
+
+        return {
+            "status": "started",
+            "incident_id": incident_id,
+            "job_id": job_id,
+            "cascade_name": cascade_config.name,
+            "cascade_stages": len(cascade_config.cascade_chain),
+            "started_at": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.exception(f"Error starting cascading outage for job {job_id}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/incidents/active", summary="List all active incidents")
+async def list_active_incidents(job_id: Optional[str] = None):
+    """
+    Returns all active correlated incidents, optionally filtered by job.
+    """
+    all_incidents = []
+
+    # Collect incidents from all running generators
+    for gen_job_id, generator in active_generators.items():
+        if job_id and gen_job_id != job_id:
+            continue
+
+        correlation_manager = generator.get_correlation_manager()
+        incidents = correlation_manager.list_active_incidents(gen_job_id)
+        all_incidents.extend(incidents)
+
+    return {
+        "incidents": all_incidents,
+        "total": len(all_incidents)
+    }
+
+
+@app.get("/incidents/templates", summary="Get cascading outage templates")
+async def get_cascade_templates():
+    """
+    Returns all available cascading outage templates.
+    """
+    templates = get_predefined_templates()
+    cascade_templates = [t for t in templates if "cascade_config" in t]
+
+    return {
+        "templates": cascade_templates,
+        "total": len(cascade_templates)
+    }
+
+
+@app.get("/incidents/{incident_id}", summary="Get incident details")
+async def get_incident_details(incident_id: str):
+    """
+    Returns detailed information about a specific incident.
+    """
+    # Search all generators for the incident
+    for job_id, generator in active_generators.items():
+        correlation_manager = generator.get_correlation_manager()
+        incident = correlation_manager.get_incident(incident_id)
+
+        if incident:
+            return {
+                "incident": incident.dict(),
+                "job_id": job_id
+            }
+
+    raise HTTPException(status_code=404, detail=f"Incident {incident_id} not found")
+
+
+@app.delete("/incidents/{incident_id}", summary="Stop and resolve incident")
+async def stop_incident(incident_id: str):
+    """
+    Stops an active incident and begins recovery.
+    """
+    # Search all generators for the incident
+    for job_id, generator in active_generators.items():
+        correlation_manager = generator.get_correlation_manager()
+
+        if correlation_manager.stop_incident(incident_id):
+            return {
+                "status": "resolved",
+                "incident_id": incident_id,
+                "job_id": job_id,
+                "resolved_at": datetime.now().isoformat()
+            }
+
+    raise HTTPException(status_code=404, detail=f"Incident {incident_id} not found")

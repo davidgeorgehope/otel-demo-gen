@@ -310,5 +310,136 @@ def get_predefined_templates() -> List[Dict[str, Any]]:
                 "ramp_down_seconds": 30
             },
             "default_duration_minutes": 4
+        },
+        # Infrastructure device scenarios
+        {
+            "name": "Switch Port Failure",
+            "description": "Network switch port goes down affecting connected services",
+            "category": "infrastructure_device",
+            "modification": {
+                "type": "interface_down",
+                "target_services": [],
+                "target_infrastructure": ["core-switch-01"],
+                "target_operations": [],
+                "parameters": [
+                    {"key": "interfaces", "value": ["Gi0/24", "Gi0/25"]},
+                    {"key": "duration_seconds", "value": 300}
+                ],
+                "ramp_up_seconds": 0,
+                "ramp_down_seconds": 0
+            },
+            "default_duration_minutes": 5
+        },
+        {
+            "name": "Firewall Blocking Traffic",
+            "description": "Firewall rule misconfiguration blocking legitimate traffic",
+            "category": "infrastructure_device",
+            "modification": {
+                "type": "firewall_rule_block",
+                "target_services": [],
+                "target_infrastructure": ["edge-firewall-01"],
+                "target_operations": [],
+                "parameters": [
+                    {"key": "blocked_ports", "value": [443, 8080]},
+                    {"key": "block_percentage", "value": 50.0}
+                ],
+                "ramp_up_seconds": 0,
+                "ramp_down_seconds": 0
+            },
+            "default_duration_minutes": 3
+        },
+        {
+            "name": "VM Host Memory Pressure",
+            "description": "Hypervisor host under memory pressure affecting all VMs",
+            "category": "infrastructure_device",
+            "modification": {
+                "type": "vm_host_overload",
+                "target_services": [],
+                "target_infrastructure": ["esxi-host-01"],
+                "target_operations": [],
+                "parameters": [
+                    {"key": "memory_percentage", "value": 95},
+                    {"key": "cpu_multiplier", "value": 1.5},
+                    {"key": "memory_multiplier", "value": 1.3}
+                ],
+                "ramp_up_seconds": 60,
+                "ramp_down_seconds": 30
+            },
+            "default_duration_minutes": 8
+        },
+        {
+            "name": "Load Balancer Backend Unhealthy",
+            "description": "Load balancer marks backends as unhealthy",
+            "category": "infrastructure_device",
+            "modification": {
+                "type": "lb_backend_unhealthy",
+                "target_services": [],
+                "target_infrastructure": ["alb-frontend"],
+                "target_operations": [],
+                "parameters": [
+                    {"key": "unhealthy_count", "value": 2},
+                    {"key": "health_check_failures", "value": 3}
+                ],
+                "ramp_up_seconds": 30,
+                "ramp_down_seconds": 15
+            },
+            "default_duration_minutes": 5
+        },
+        {
+            "name": "Storage Latency Spike",
+            "description": "SAN/NAS storage experiencing high latency",
+            "category": "infrastructure_device",
+            "modification": {
+                "type": "storage_latency_spike",
+                "target_services": [],
+                "target_infrastructure": ["san-primary"],
+                "target_operations": [],
+                "parameters": [
+                    {"key": "latency_multiplier", "value": 5.0},
+                    {"key": "iops_reduction", "value": 0.5}
+                ],
+                "ramp_up_seconds": 30,
+                "ramp_down_seconds": 60
+            },
+            "default_duration_minutes": 6
+        },
+        # Cascading outage scenarios
+        {
+            "name": "Storage to Database Cascade",
+            "description": "Storage latency causes database timeouts cascading to app errors",
+            "category": "cascading",
+            "cascade_config": {
+                "name": "Storage Cascade",
+                "description": "Storage array latency cascading to application layer",
+                "origin": "infrastructure",
+                "trigger_component": "san-primary",
+                "cascade_chain": [
+                    {"component": "san-primary", "effect": "storage_latency_spike", "delay_ms": 0, "parameters": {"latency_multiplier": 5.0}},
+                    {"component": "postgres-main", "effect": "query_timeout", "delay_ms": 5000, "parameters": {"timeout_multiplier": 3.0}},
+                    {"component": "user-service", "effect": "error_rate", "delay_ms": 10000, "parameters": {"error_percentage": 30.0}},
+                    {"component": "api-gateway", "effect": "latency_spike", "delay_ms": 15000, "parameters": {"latency_multiplier": 2.0}}
+                ],
+                "delay_between_stages_ms": 5000
+            },
+            "default_duration_minutes": 10
+        },
+        {
+            "name": "Network Switch Cascade",
+            "description": "Switch failure cascades to VM network issues and app errors",
+            "category": "cascading",
+            "cascade_config": {
+                "name": "Network Switch Cascade",
+                "description": "Core switch failure affecting multiple layers",
+                "origin": "infrastructure",
+                "trigger_component": "core-switch-01",
+                "cascade_chain": [
+                    {"component": "core-switch-01", "effect": "interface_down", "delay_ms": 0, "parameters": {}},
+                    {"component": "vm-app-01", "effect": "network_timeout", "delay_ms": 2000, "parameters": {}},
+                    {"component": "payment-service", "effect": "service_unavailable", "delay_ms": 5000, "parameters": {"unavailable_percentage": 100.0}},
+                    {"component": "order-service", "effect": "error_rate", "delay_ms": 8000, "parameters": {"error_percentage": 50.0}}
+                ],
+                "delay_between_stages_ms": 3000
+            },
+            "default_duration_minutes": 8
         }
     ]

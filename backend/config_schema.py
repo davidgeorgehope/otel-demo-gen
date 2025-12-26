@@ -1,5 +1,5 @@
 from typing import Optional, List, Dict, Any, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator, field_validator
 from datetime import datetime
 
 # Pydantic models for API requests
@@ -16,27 +16,42 @@ class StartDemoRequest(BaseModel):
 
 class LatencyConfig(BaseModel):
     """Defines latency characteristics for an operation or dependency."""
-    min_ms: int = Field(..., description="Minimum latency in milliseconds.")
-    max_ms: int = Field(..., description="Maximum latency in milliseconds.")
-    probability: float = Field(1.0, description="Probability of this latency occurring (0.0 to 1.0).")
+    min_ms: int = Field(..., description="Minimum latency in milliseconds.", ge=0)
+    max_ms: int = Field(..., description="Maximum latency in milliseconds.", ge=0)
+    probability: float = Field(1.0, description="Probability of this latency occurring (0.0 to 1.0).", ge=0.0, le=1.0)
+
+    @model_validator(mode='after')
+    def validate_min_max(self) -> 'LatencyConfig':
+        """Ensure min_ms <= max_ms, swapping if necessary."""
+        if self.min_ms > self.max_ms:
+            self.min_ms, self.max_ms = self.max_ms, self.min_ms
+        return self
 
 class BusinessDataField(BaseModel):
     """Defines a business-relevant data field to be added to traces."""
     name: str = Field(..., description="The field name that will be added as a span attribute (e.g., 'cart_amount', 'user_id').")
     type: str = Field(..., description="Data type: 'string', 'number', 'integer', 'boolean', or 'enum'.")
-    
+
     # For string fields
     pattern: Optional[str] = Field(None, description="Pattern for string generation (e.g., 'user_{random}', 'order_{uuid}').")
-    
-    # For number/integer fields  
+
+    # For number/integer fields
     min_value: Optional[float] = Field(None, description="Minimum value for numeric fields.")
     max_value: Optional[float] = Field(None, description="Maximum value for numeric fields.")
-    
+
     # For enum fields
     values: Optional[List[str]] = Field(None, description="List of possible values for enum fields.")
-    
+
     # For boolean fields (no additional config needed)
     description: Optional[str] = Field(None, description="Optional description of what this field represents.")
+
+    @model_validator(mode='after')
+    def validate_min_max(self) -> 'BusinessDataField':
+        """Ensure min_value <= max_value for numeric fields, swapping if necessary."""
+        if self.min_value is not None and self.max_value is not None:
+            if self.min_value > self.max_value:
+                self.min_value, self.max_value = self.max_value, self.min_value
+        return self
 
 class Operation(BaseModel):
     """Defines a specific business operation within a service."""
@@ -94,6 +109,78 @@ class MessageQueue(BaseModel):
     name: str
     type: str
 
+# --- Infrastructure Models ---
+
+class NetworkDevice(BaseModel):
+    """Network device configuration (switches, routers, firewalls)."""
+    name: str = Field(..., description="Unique device name (e.g., 'core-switch-01')")
+    type: str = Field(..., description="Device type: 'switch', 'router', 'firewall'")
+    vendor: Optional[str] = Field(None, description="Vendor: 'cisco', 'juniper', 'palo_alto', 'arista', 'fortinet'")
+    model: Optional[str] = Field(None, description="Device model")
+    interfaces: List[str] = Field(default_factory=list, description="Interface names (e.g., 'Gi0/1', 'eth0')")
+    connected_services: List[str] = Field(default_factory=list, description="Services reachable through this device")
+
+class VirtualMachine(BaseModel):
+    """VM/Hypervisor configuration."""
+    name: str = Field(..., description="VM name (e.g., 'vm-app-01')")
+    hypervisor_type: str = Field(..., description="Hypervisor: 'esxi', 'hyperv', 'kvm', 'proxmox'")
+    host_name: str = Field(..., description="Physical host running this VM")
+    vcpus: int = Field(4, description="Number of virtual CPUs")
+    memory_gb: int = Field(16, description="Memory allocation in GB")
+    disk_gb: int = Field(100, description="Disk allocation in GB")
+    hosted_services: List[str] = Field(default_factory=list, description="Services running on this VM")
+
+class LoadBalancer(BaseModel):
+    """Load balancer configuration."""
+    name: str = Field(..., description="Load balancer name (e.g., 'alb-frontend')")
+    type: str = Field(..., description="Type: 'f5', 'haproxy', 'nginx', 'aws_alb', 'azure_lb', 'gcp_lb'")
+    backend_services: List[str] = Field(default_factory=list, description="Backend services being load balanced")
+    virtual_servers: List[str] = Field(default_factory=list, description="Virtual server names/IPs")
+    health_check_path: Optional[str] = Field("/health", description="Health check endpoint")
+
+class StorageSystem(BaseModel):
+    """Storage system configuration."""
+    name: str = Field(..., description="Storage system name (e.g., 'san-primary')")
+    type: str = Field(..., description="Type: 'san', 'nas', 's3', 'azure_blob', 'nfs', 'iscsi'")
+    vendor: Optional[str] = Field(None, description="Vendor: 'netapp', 'dell_emc', 'pure', 'hpe'")
+    capacity_tb: float = Field(10.0, description="Total capacity in TB")
+    connected_services: List[str] = Field(default_factory=list, description="Services using this storage")
+
+class InfrastructureConfig(BaseModel):
+    """Complete infrastructure topology configuration."""
+    network_devices: List[NetworkDevice] = Field(default_factory=list)
+    virtual_machines: List[VirtualMachine] = Field(default_factory=list)
+    load_balancers: List[LoadBalancer] = Field(default_factory=list)
+    storage_systems: List[StorageSystem] = Field(default_factory=list)
+
+# --- Correlation Models ---
+
+class CascadeStage(BaseModel):
+    """Individual stage in a cascading outage."""
+    component: str = Field(..., description="Component affected at this stage")
+    effect: str = Field(..., description="Effect type: 'latency_spike', 'error_rate', 'unavailable', etc.")
+    delay_ms: int = Field(0, description="Delay from previous stage in milliseconds")
+    parameters: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Effect-specific parameters")
+
+class IncidentCorrelation(BaseModel):
+    """Correlation context for unified incident tracking across all signals."""
+    incident_id: str = Field(..., description="Unique incident identifier (e.g., 'INC-20241226-A1B2C3')")
+    root_cause_type: str = Field(..., description="Origin: 'infrastructure', 'application', 'external'")
+    root_cause_component: str = Field(..., description="Specific component causing the issue")
+    affected_components: List[str] = Field(default_factory=list, description="All affected components")
+    cascade_path: List[str] = Field(default_factory=list, description="Ordered failure propagation path")
+    severity: str = Field("medium", description="Severity: 'critical', 'high', 'medium', 'low'")
+    description: Optional[str] = Field(None, description="Human-readable incident description")
+
+class CascadingOutageConfig(BaseModel):
+    """Configuration for cascading outage simulation."""
+    name: str = Field(..., description="Outage scenario name")
+    description: str = Field(..., description="What this outage simulates")
+    origin: str = Field(..., description="Origin layer: 'infrastructure' or 'application'")
+    trigger_component: str = Field(..., description="Component that triggers the cascade")
+    cascade_chain: List[CascadeStage] = Field(..., description="Ordered cascade stages")
+    delay_between_stages_ms: int = Field(5000, description="Default delay between stages")
+
 class Telemetry(BaseModel):
     trace_rate: int = 1
     error_rate: float = 0.05
@@ -105,7 +192,16 @@ class ScenarioConfig(BaseModel):
     services: List[Service]
     databases: Optional[List[Database]] = []
     message_queues: Optional[List[MessageQueue]] = []
+    infrastructure: Optional[InfrastructureConfig] = Field(None, description="Infrastructure topology configuration")
     telemetry: Telemetry
+
+    @field_validator('services')
+    @classmethod
+    def services_not_empty(cls, v):
+        """Ensure at least one service is defined."""
+        if not v:
+            raise ValueError('At least one service is required')
+        return v
 
 # --- Scenario Simulation Models ---
 
@@ -168,3 +264,22 @@ class ScenarioApplyRequest(BaseModel):
     template_name: Optional[str] = Field(None, description="Name of template to apply")
     duration_minutes: Optional[int] = Field(None, description="How long to run (overrides template default)")
     description: Optional[str] = Field(None, description="Custom description for this scenario instance")
+
+# --- Cascading Outage Request Models ---
+
+class CascadingOutageRequest(BaseModel):
+    """Request to start a cascading outage simulation."""
+    outage_config: Optional[CascadingOutageConfig] = Field(None, description="Custom cascading outage configuration")
+    template_name: Optional[str] = Field(None, description="Name of predefined cascade template")
+    description: Optional[str] = Field(None, description="Natural language description for LLM to generate cascade")
+    duration_minutes: Optional[int] = Field(None, description="How long to run the cascade")
+
+class ActiveIncident(BaseModel):
+    """Represents an active correlated incident across a job."""
+    incident_id: str = Field(..., description="Unique incident ID")
+    job_id: str = Field(..., description="Job this incident affects")
+    correlation: IncidentCorrelation = Field(..., description="Correlation context")
+    outage_config: CascadingOutageConfig = Field(..., description="The cascade configuration")
+    started_at: datetime = Field(default_factory=datetime.now)
+    current_stage: int = Field(0, description="Current cascade stage index")
+    status: str = Field("active", description="Status: 'active', 'cascading', 'recovering', 'resolved'")

@@ -336,6 +336,76 @@ SCENARIO_RESPONSE_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False
             }
         },
+        "infrastructure": {
+            "type": "object",
+            "description": "Infrastructure topology configuration (optional)",
+            "properties": {
+                "network_devices": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "type"],
+                        "properties": {
+                            "name": {"type": "string", "description": "Device name (e.g., 'core-switch-01')"},
+                            "type": {"type": "string", "enum": ["switch", "router", "firewall"]},
+                            "vendor": {"type": "string", "enum": ["cisco", "juniper", "arista", "palo_alto", "fortinet"]},
+                            "model": {"type": "string"},
+                            "interfaces": {"type": "array", "items": {"type": "string"}},
+                            "connected_services": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "additionalProperties": False
+                    }
+                },
+                "virtual_machines": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "hypervisor_type", "host_name"],
+                        "properties": {
+                            "name": {"type": "string", "description": "VM name (e.g., 'vm-app-01')"},
+                            "hypervisor_type": {"type": "string", "enum": ["esxi", "hyperv", "kvm", "proxmox"]},
+                            "host_name": {"type": "string", "description": "Physical host running this VM"},
+                            "vcpus": {"type": "integer", "default": 4},
+                            "memory_gb": {"type": "integer", "default": 16},
+                            "disk_gb": {"type": "integer", "default": 100},
+                            "hosted_services": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "additionalProperties": False
+                    }
+                },
+                "load_balancers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "type"],
+                        "properties": {
+                            "name": {"type": "string", "description": "Load balancer name (e.g., 'alb-frontend')"},
+                            "type": {"type": "string", "enum": ["f5", "haproxy", "nginx", "aws_alb", "azure_lb", "gcp_lb"]},
+                            "backend_services": {"type": "array", "items": {"type": "string"}},
+                            "virtual_servers": {"type": "array", "items": {"type": "string"}},
+                            "health_check_path": {"type": "string", "default": "/health"}
+                        },
+                        "additionalProperties": False
+                    }
+                },
+                "storage_systems": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "type"],
+                        "properties": {
+                            "name": {"type": "string", "description": "Storage system name (e.g., 'san-primary')"},
+                            "type": {"type": "string", "enum": ["san", "nas", "s3", "azure_blob", "nfs", "iscsi"]},
+                            "vendor": {"type": "string", "enum": ["netapp", "dell_emc", "pure", "hpe", "aws", "microsoft"]},
+                            "capacity_tb": {"type": "number", "default": 10.0},
+                            "connected_services": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "additionalProperties": False
+                    }
+                }
+            },
+            "additionalProperties": False
+        },
         "telemetry": {
             "type": "object",
             "required": ["trace_rate", "error_rate", "metrics_interval", "include_logs"],
@@ -365,6 +435,33 @@ REQUIREMENTS
 5. Keep latency objects well-formed and ensure probability defaults to 1.0 if omitted.
 6. Prefer detailed business_data definitions that match the service domain.
 7. Generate a short, descriptive "title" (max 5-7 words) that summarizes the scenario.
+8. When generating infrastructure configuration:
+   - Create realistic network topology (core switches, distribution switches, edge routers, firewalls)
+   - Map services to VMs and VMs to hypervisor hosts logically
+   - Place load balancers in front of frontend/API services
+   - Connect databases to appropriate storage systems
+   - Ensure connected_services arrays accurately reflect the service topology
+   - Use realistic naming conventions (e.g., core-switch-01, esxi-host-01, alb-frontend)
+
+INFRASTRUCTURE EXAMPLE:
+{{
+  "infrastructure": {{
+    "network_devices": [
+      {{"name": "core-switch-01", "type": "switch", "vendor": "cisco", "connected_services": ["api-gateway", "user-service"]}},
+      {{"name": "edge-firewall-01", "type": "firewall", "vendor": "palo_alto", "connected_services": ["api-gateway"]}}
+    ],
+    "virtual_machines": [
+      {{"name": "vm-app-01", "hypervisor_type": "esxi", "host_name": "esxi-host-01", "vcpus": 8, "memory_gb": 32, "hosted_services": ["user-service", "order-service"]}},
+      {{"name": "vm-db-01", "hypervisor_type": "esxi", "host_name": "esxi-host-02", "vcpus": 16, "memory_gb": 64, "hosted_services": ["postgres-main"]}}
+    ],
+    "load_balancers": [
+      {{"name": "alb-frontend", "type": "aws_alb", "backend_services": ["api-gateway"], "health_check_path": "/health"}}
+    ],
+    "storage_systems": [
+      {{"name": "san-primary", "type": "san", "vendor": "netapp", "capacity_tb": 50.0, "connected_services": ["postgres-main", "mongodb-analytics"]}}
+    ]
+  }}
+}}
 
 EXPECTED JSON SCHEMA:
 {SCENARIO_SCHEMA_TEXT}

@@ -8,11 +8,20 @@ import json
 import httpx
 import uuid
 import re
+import logging
 from typing import Dict, List, Any, Tuple, Union, Optional, Set
 from datetime import datetime, timezone
 
 from config_schema import ScenarioConfig, Service, ServiceDependency, DbDependency, CacheDependency, LatencyConfig, Operation, BusinessDataField, ScenarioModification
+
+logger = logging.getLogger(__name__)
 from k8s_metrics_generator import K8sMetricsGenerator
+from correlation_manager import CorrelationManager
+from infra_network_generator import NetworkDeviceGenerator
+from infra_vm_generator import VMHypervisorGenerator
+from infra_loadbalancer_generator import LoadBalancerGenerator
+from storage_metrics_generator import StorageMetricsGenerator
+from database_metrics_generator import DatabaseMetricsGenerator
 
 class TelemetryGenerator:
     """
@@ -61,27 +70,56 @@ class TelemetryGenerator:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._k8s_thread: Optional[threading.Thread] = None  # New: K8s metrics thread
-        
+
         # Error handling and connection monitoring
         self.failure_callback = failure_callback  # Callback to report failures to job management
         self.consecutive_failures = 0
         self.max_failures = 5  # Fail the job after 5 consecutive OTLP failures
         self.last_successful_send = None
         self.is_failed = False  # Track if generator has failed due to connection issues
-        
+
         self.headers = {"Content-Type": "application/json"}
         if self.api_key:
             self.headers["Authorization"] = f"{self.auth_type} {self.api_key}"
 
-        self.client = httpx.Client(headers=self.headers, http2=True)
+        # Initialize client to None first for safe cleanup on exception
+        self.client = None
+        try:
+            self.client = httpx.Client(headers=self.headers, http2=True)
+        except Exception:
+            # Ensure client is closed if it was partially created
+            if self.client:
+                self.client.close()
+            raise
 
         self.services_map = {s.name: s for s in self.config.services}
         self.db_map = {db.name: db for db in self.config.databases}
         self.mq_map = {mq.name: mq for mq in self.config.message_queues}
         
+        # Initialize correlation manager for incident tracking
+        self.correlation_manager = CorrelationManager()
+
         # Initialize K8s metrics generator
         self.k8s_generator = K8sMetricsGenerator(config)
-        
+
+        # Initialize infrastructure generators (if infrastructure is configured)
+        self.infra_generators: Dict[str, Any] = {}
+        self._infra_thread: Optional[threading.Thread] = None
+
+        if config.infrastructure:
+            if config.infrastructure.network_devices:
+                self.infra_generators['network'] = NetworkDeviceGenerator(config, self.correlation_manager)
+            if config.infrastructure.virtual_machines:
+                self.infra_generators['vm'] = VMHypervisorGenerator(config, self.correlation_manager)
+            if config.infrastructure.load_balancers:
+                self.infra_generators['lb'] = LoadBalancerGenerator(config, self.correlation_manager)
+            if config.infrastructure.storage_systems:
+                self.infra_generators['storage'] = StorageMetricsGenerator(config, self.correlation_manager)
+
+        # Initialize database metrics generator (uses existing databases config)
+        if config.databases:
+            self.infra_generators['database'] = DatabaseMetricsGenerator(config, self.correlation_manager)
+
         # Pre-generate resource attributes for each service (using k8s data)
         self.service_resource_attributes_metrics = {
             s.name: self._generate_resource_attributes(s, "metrics") for s in self.config.services
@@ -110,16 +148,36 @@ class TelemetryGenerator:
         self._error_counters = {s.name: 0 for s in self.config.services}
         self._runtime_counters = {s.name: 0 for s in self.config.services}
 
+        # Counter overflow prevention
+        self._max_counter_value = 10_000_000
+        self._counter_reset_base = (1000, 5000)  # Range for reset values
+
     @staticmethod
     def _get_service_language(service: Service) -> str:
         return (service.language or 'python').lower()
+
+    def _maybe_reset_counters(self):
+        """Reset counters periodically to prevent integer overflow in long-running jobs."""
+        reset_min, reset_max = self._counter_reset_base
+        for service_name, count in self._request_counters.items():
+            if count > self._max_counter_value:
+                self._request_counters[service_name] = random.randint(reset_min, reset_max)
+                logger.debug(f"Reset request counter for {service_name} (was {count})")
+        for service_name, count in self._error_counters.items():
+            if count > self._max_counter_value:
+                self._error_counters[service_name] = random.randint(reset_min // 10, reset_max // 10)
+                logger.debug(f"Reset error counter for {service_name} (was {count})")
+        for service_name, count in self._runtime_counters.items():
+            if count > self._max_counter_value:
+                self._runtime_counters[service_name] = random.randint(reset_min // 10, reset_max // 10)
+                logger.debug(f"Reset runtime counter for {service_name} (was {count})")
 
     def _generate_k8s_telemetry(self):
         """The main loop for the k8s metrics generator thread."""
         # For demo purposes, send K8s metrics more frequently
         k8s_metrics_interval = 10  # Send every 10 seconds instead of 30
         
-        print("Kubernetes metrics generation loop started.")
+        logger.info("Kubernetes metrics generation loop started.")
         while not self._stop_event.is_set():
             self.generate_and_send_k8s_metrics()
             self.generate_and_send_k8s_logs()  # Also send K8s logs
@@ -127,12 +185,12 @@ class TelemetryGenerator:
             # Wait for the interval or until stop event is set
             self._stop_event.wait(k8s_metrics_interval)
         
-        print("Kubernetes metrics generation loop finished.")
+        logger.info("Kubernetes metrics generation loop finished.")
 
     def generate_and_send_k8s_metrics(self):
         """Generates and sends Kubernetes pod metrics."""
         if not self.collector_url:
-            print("Warning: OTLP endpoint not configured. Cannot send k8s metrics.")
+            logger.warning("OTLP endpoint not configured. Cannot send k8s metrics.")
             return
             
         k8s_metrics_payload = self.k8s_generator.generate_k8s_metrics_payload()
@@ -145,7 +203,7 @@ class TelemetryGenerator:
         If dry_run is True, it returns the payload as a JSON string instead of sending it.
         """
         if not self.collector_url and not dry_run:
-            print("Warning: OTLP endpoint not configured. Cannot send k8s logs.")
+            logger.warning("OTLP endpoint not configured. Cannot send k8s logs.")
             return
             
         # Generate logs occasionally, but always for a dry run
@@ -158,8 +216,67 @@ class TelemetryGenerator:
                     self._send_payload(f"{self.collector_url}v1/logs", k8s_logs_payload, "k8s-logs")
         return None
 
+    def _generate_infra_telemetry(self):
+        """The main loop for infrastructure telemetry generation."""
+        infra_interval = 15  # Send infrastructure metrics every 15 seconds
 
+        logger.info("Infrastructure telemetry generation loop started.")
+        while not self._stop_event.is_set():
+            self.generate_and_send_infra_metrics()
+            self._stop_event.wait(infra_interval)
 
+        logger.info("Infrastructure telemetry generation loop finished.")
+
+    def generate_and_send_infra_metrics(self):
+        """Generates and sends infrastructure metrics from all configured generators."""
+        if not self.collector_url:
+            logger.warning("OTLP endpoint not configured. Cannot send infrastructure metrics.")
+            return
+
+        # Network device metrics
+        if 'network' in self.infra_generators:
+            payload = self.infra_generators['network'].generate_network_metrics_payload()
+            if payload.get("resourceMetrics"):
+                self._send_payload(f"{self.collector_url}v1/metrics", payload, "network-metrics")
+
+            # Also send network device logs
+            logs_payload = self.infra_generators['network'].generate_network_logs_payload()
+            if logs_payload.get("resourceLogs"):
+                self._send_payload(f"{self.collector_url}v1/logs", logs_payload, "network-logs")
+
+        # VM/Hypervisor metrics
+        if 'vm' in self.infra_generators:
+            # VM metrics
+            payload = self.infra_generators['vm'].generate_vm_metrics_payload()
+            if payload.get("resourceMetrics"):
+                self._send_payload(f"{self.collector_url}v1/metrics", payload, "vm-metrics")
+
+            # Hypervisor host metrics
+            host_payload = self.infra_generators['vm'].generate_hypervisor_metrics_payload()
+            if host_payload.get("resourceMetrics"):
+                self._send_payload(f"{self.collector_url}v1/metrics", host_payload, "hypervisor-metrics")
+
+        # Load balancer metrics
+        if 'lb' in self.infra_generators:
+            payload = self.infra_generators['lb'].generate_lb_metrics_payload()
+            if payload.get("resourceMetrics"):
+                self._send_payload(f"{self.collector_url}v1/metrics", payload, "lb-metrics")
+
+        # Storage metrics
+        if 'storage' in self.infra_generators:
+            payload = self.infra_generators['storage'].generate_storage_metrics_payload()
+            if payload.get("resourceMetrics"):
+                self._send_payload(f"{self.collector_url}v1/metrics", payload, "storage-metrics")
+
+        # Database metrics
+        if 'database' in self.infra_generators:
+            payload = self.infra_generators['database'].generate_database_metrics_payload()
+            if payload.get("resourceMetrics"):
+                self._send_payload(f"{self.collector_url}v1/metrics", payload, "database-metrics")
+
+    def get_correlation_manager(self) -> CorrelationManager:
+        """Get the correlation manager for incident tracking."""
+        return self.correlation_manager
 
 
     def _generate_resource_attributes(self, service: Service, telemetry_type: str = "metrics") -> Dict[str, Any]:
@@ -223,8 +340,10 @@ class TelemetryGenerator:
 
         metrics_interval = self.config.telemetry.metrics_interval
         last_metrics_time = time.time()
+        last_cleanup_time = time.time()
+        cleanup_interval = 300  # Run cleanup every 5 minutes
 
-        print("Telemetry generation loop started.")
+        logger.info("Telemetry generation loop started.")
         while not self._stop_event.is_set():
             if trace_interval > 0:
                 self.generate_and_send_traces_and_logs()
@@ -233,18 +352,23 @@ class TelemetryGenerator:
                 self.generate_and_send_metrics()
                 last_metrics_time = time.time()
 
+            # Periodically cleanup stale incidents to prevent memory leaks
+            if time.time() - last_cleanup_time >= cleanup_interval:
+                self.correlation_manager.cleanup_stale_incidents()
+                last_cleanup_time = time.time()
+
             # The wait call will be interrupted if the stop event is set
             self._stop_event.wait(trace_interval if trace_interval > 0 else 1)
-        
-        print("Telemetry generation loop finished.")
+
+        logger.info("Telemetry generation loop finished.")
 
     def start(self):
         """Starts the telemetry generation in a background thread."""
         if self._thread and self._thread.is_alive():
-            print("Generator is already running.")
+            logger.warning("Generator is already running.")
             return
 
-        print("Starting telemetry generator...")
+        logger.info("Starting telemetry generator...")
         self._stop_event.clear()
         
         # Start main telemetry thread
@@ -256,14 +380,22 @@ class TelemetryGenerator:
         self._k8s_thread = threading.Thread(target=self._generate_k8s_telemetry, name="K8sMetricsThread")
         self._k8s_thread.daemon = True
         self._k8s_thread.start()
-        
-        print("Generator threads started (main + k8s metrics).")
+
+        # Start infrastructure metrics thread (if any infrastructure generators are configured)
+        if self.infra_generators:
+            self._infra_thread = threading.Thread(target=self._generate_infra_telemetry, name="InfraMetricsThread")
+            self._infra_thread.daemon = True
+            self._infra_thread.start()
+            logger.info(f"Generator threads started (main + k8s + infra with {list(self.infra_generators.keys())}).")
+        else:
+            logger.info("Generator threads started (main + k8s metrics).")
 
     def is_running(self) -> bool:
         """Checks if the generator threads are currently running."""
         main_running = self._thread is not None and self._thread.is_alive()
         k8s_running = self._k8s_thread is not None and self._k8s_thread.is_alive()
-        return main_running or k8s_running
+        infra_running = self._infra_thread is not None and self._infra_thread.is_alive()
+        return main_running or k8s_running or infra_running
 
     def get_config_as_dict(self) -> Dict[str, Any]:
         """Returns the current scenario configuration as a dictionary."""
@@ -272,43 +404,50 @@ class TelemetryGenerator:
     def stop(self):
         """Stops the telemetry generation."""
         if not self.is_running():
-            print("Generator is not running.")
+            logger.warning("Generator is not running.")
             return
 
-        print("Stopping telemetry generator...")
+        logger.info("Stopping telemetry generator...")
         self._stop_event.set()
-        
-        # Stop main thread
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
-            if self._thread.is_alive():
-                print("Warning: Main generator thread did not stop in time.")
+
+        # Wait for ALL threads to stop BEFORE closing the client
+        # This prevents race condition where threads try to send while client is closed
+        threads_to_stop = [
+            (self._thread, "Main generator"),
+            (self._k8s_thread, "K8s metrics"),
+            (self._infra_thread, "Infrastructure metrics")
+        ]
+
+        for thread, name in threads_to_stop:
+            if thread and thread.is_alive():
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    logger.warning(f"{name} thread did not stop in time.")
+
+        # Clear thread references
         self._thread = None
-        
-        # Stop k8s thread
-        if self._k8s_thread and self._k8s_thread.is_alive():
-            self._k8s_thread.join(timeout=5)
-            if self._k8s_thread.is_alive():
-                print("Warning: K8s metrics thread did not stop in time.")
         self._k8s_thread = None
-        
-        self.client.close()
-        print("Generator stopped.")
+        self._infra_thread = None
+
+        # Only close client after all threads have stopped
+        if self.client:
+            self.client.close()
+        logger.info("Generator stopped.")
 
     def apply_scenario(self, scenario_id: str, scenario: ScenarioModification):
         """Applies a scenario modification to the telemetry generation."""
         with self._scenario_lock:
             self._active_scenarios[scenario_id] = scenario
-            print(f"Applied scenario '{scenario_id}': {scenario.type} targeting {scenario.target_services}")
+            logger.info(f"Applied scenario '{scenario_id}': {scenario.type} targeting {scenario.target_services}")
 
     def stop_scenario(self, scenario_id: str):
         """Stops a specific scenario."""
         with self._scenario_lock:
             if scenario_id in self._active_scenarios:
                 scenario = self._active_scenarios.pop(scenario_id)
-                print(f"Stopped scenario '{scenario_id}': {scenario.type}")
+                logger.info(f"Stopped scenario '{scenario_id}': {scenario.type}")
             else:
-                print(f"Scenario '{scenario_id}' not found")
+                logger.warning(f"Scenario '{scenario_id}' not found")
 
     def get_active_scenarios(self) -> Dict[str, ScenarioModification]:
         """Returns copy of currently active scenarios."""
@@ -538,7 +677,7 @@ class TelemetryGenerator:
     def generate_and_send_traces_and_logs(self):
         """Generates and sends a single trace and its associated logs."""
         if not self.collector_url:
-            print("Warning: OTLP endpoint not configured. Cannot send telemetry.")
+            logger.warning("OTLP endpoint not configured. Cannot send telemetry.")
             return
 
         spans = self.generate_spans()
@@ -554,7 +693,7 @@ class TelemetryGenerator:
     def generate_and_send_metrics(self):
         """Generates and sends a batch of metrics for all services."""
         if not self.collector_url:
-            print("Warning: OTLP endpoint not configured. Cannot send telemetry.")
+            logger.warning("OTLP endpoint not configured. Cannot send telemetry.")
             return
             
         metrics_payload = self.generate_otlp_metrics_payload()
@@ -565,26 +704,26 @@ class TelemetryGenerator:
         try:
             response = self.client.post(url, data=json.dumps(payload), timeout=5)
             response.raise_for_status()
-            print(f"Successfully sent {signal_name} to {url} - Status: {response.status_code}")
-            
+            logger.debug(f"Successfully sent {signal_name} to {url} - Status: {response.status_code}")
+
             # Reset failure count on successful send
             self.consecutive_failures = 0
             self.last_successful_send = datetime.now()
-            
+
             # Debug: Log payload structure for metrics
             if signal_name == "k8s-metrics" and payload.get("resourceMetrics"):
                 resource_count = len(payload["resourceMetrics"])
                 if resource_count > 0:
                     metric_count = len(payload["resourceMetrics"][0].get("scopeMetrics", [{}])[0].get("metrics", []))
                     scope_name = payload["resourceMetrics"][0].get("scopeMetrics", [{}])[0].get("scope", {}).get("name", "unknown")
-                    print(f"  📊 Sent {metric_count} k8s metrics from {resource_count} resources with scope: {scope_name}")
-            
+                    logger.debug(f"Sent {metric_count} k8s metrics from {resource_count} resources with scope: {scope_name}")
+
             # Debug: Log payload structure for K8s logs
             if signal_name == "k8s-logs" and payload.get("resourceLogs"):
                 resource_count = len(payload["resourceLogs"])
                 total_logs = sum(len(rl.get("scopeLogs", [{}])[0].get("logRecords", [])) for rl in payload["resourceLogs"])
                 if total_logs > 0:
-                    print(f"  📝 Sent {total_logs} k8s logs from {resource_count} resources")
+                    logger.debug(f"Sent {total_logs} k8s logs from {resource_count} resources")
             
         except httpx.RequestError as e:
             self._handle_connection_failure(f"Connection error sending {signal_name}: {e}", url)
@@ -596,13 +735,13 @@ class TelemetryGenerator:
     def _handle_connection_failure(self, error_message: str, url: str):
         """Handle OTLP connection failures with escalating response."""
         self.consecutive_failures += 1
-        print(f"❌ {error_message} (failure {self.consecutive_failures}/{self.max_failures})")
+        logger.error(f"{error_message} (failure {self.consecutive_failures}/{self.max_failures})")
         
         # If we've reached the failure threshold, mark the job as failed
         if self.consecutive_failures >= self.max_failures and not self.is_failed:
             self.is_failed = True
             full_error = f"OTLP endpoint unreachable: {self.consecutive_failures} consecutive failures to {url}. Last error: {error_message}"
-            print(f"🚨 Generator marking job as failed: {full_error}")
+            logger.critical(f"Generator marking job as failed: {full_error}")
             
             # Notify the job management system via callback
             if self.failure_callback:
@@ -721,11 +860,17 @@ class TelemetryGenerator:
                 elif field.type == "number":
                     min_val = field.min_value if field.min_value is not None else 0.0
                     max_val = field.max_value if field.max_value is not None else 100.0
+                    # Ensure min <= max to prevent random.uniform crash
+                    if min_val > max_val:
+                        min_val, max_val = max_val, min_val
                     attributes[field.name] = round(random.uniform(min_val, max_val), 2)
-                    
+
                 elif field.type == "integer":
                     min_val = int(field.min_value) if field.min_value is not None else 0
                     max_val = int(field.max_value) if field.max_value is not None else 100
+                    # Ensure min <= max to prevent random.randint crash
+                    if min_val > max_val:
+                        min_val, max_val = max_val, min_val
                     attributes[field.name] = random.randint(min_val, max_val)
                     
                 elif field.type == "boolean":
@@ -742,7 +887,7 @@ class TelemetryGenerator:
                     attributes[field.name] = f"unknown_type_{field.type}"
                     
             except Exception as e:
-                print(f"Warning: Error generating business data for field '{field.name}': {e}")
+                logger.warning(f"Error generating business data for field '{field.name}': {e}")
                 attributes[field.name] = "generation_error"
                 
         return attributes
@@ -878,6 +1023,9 @@ class TelemetryGenerator:
         """
         Generates a complete OTLP/JSON MetricsData payload for all services.
         """
+        # Prevent counter overflow in long-running jobs
+        self._maybe_reset_counters()
+
         resource_metrics = []
         current_time_ns = str(time.time_ns())
 
@@ -972,7 +1120,11 @@ class TelemetryGenerator:
         entry_points = self._find_entry_points()
         if not entry_points:
             return {}
-        
+
+        # Safety check: ensure entry_points is not empty before selection
+        if len(entry_points) == 0:
+            return {}
+
         entry_point = secrets.choice(entry_points)
 
         trace_id = self._generate_id(16)

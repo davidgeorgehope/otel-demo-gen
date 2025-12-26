@@ -1,0 +1,18 @@
+# Testing
+pytest>=7.0
+pytest-asyncio>=0.21
+pytest-cov>=4.0
+pytest-mock>=3.10
+
+# HTTP mocking
+respx>=0.20
+httpx[http2]
+
+# Type checking
+mypy>=1.0
+
+# Linting
+ruff>=0.1.0
+
+# Include main requirements
+-r requirements.txt
