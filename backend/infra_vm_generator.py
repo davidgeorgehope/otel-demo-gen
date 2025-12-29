@@ -207,6 +207,10 @@ class VMHypervisorGenerator(BaseInfrastructureGenerator):
 
         return attrs
 
+    def generate_metrics_payload(self) -> Dict[str, List[Any]]:
+        """Generate OTLP metrics payload for all VMs (implements abstract method)."""
+        return self.generate_vm_metrics_payload()
+
     def generate_vm_metrics_payload(self) -> Dict[str, List[Any]]:
         """Generate OTLP metrics payload for all VMs."""
         if not self.vms:

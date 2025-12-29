@@ -169,6 +169,10 @@ class NetworkDeviceGenerator(BaseInfrastructureGenerator):
 
         return attrs
 
+    def generate_metrics_payload(self) -> Dict[str, List[Any]]:
+        """Generate OTLP metrics payload for all network devices (implements abstract method)."""
+        return self.generate_network_metrics_payload()
+
     def generate_network_metrics_payload(self) -> Dict[str, List[Any]]:
         """Generate OTLP metrics payload for all network devices."""
         if not self.devices:

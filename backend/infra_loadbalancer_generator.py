@@ -156,6 +156,10 @@ class LoadBalancerGenerator(BaseInfrastructureGenerator):
 
         return attrs
 
+    def generate_metrics_payload(self) -> Dict[str, List[Any]]:
+        """Generate OTLP metrics payload for all load balancers (implements abstract method)."""
+        return self.generate_lb_metrics_payload()
+
     def generate_lb_metrics_payload(self) -> Dict[str, List[Any]]:
         """Generate OTLP metrics payload for all load balancers."""
         if not self.load_balancers:

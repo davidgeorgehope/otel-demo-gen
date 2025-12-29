@@ -171,6 +171,10 @@ class StorageMetricsGenerator(BaseInfrastructureGenerator):
 
         return attrs
 
+    def generate_metrics_payload(self) -> Dict[str, List[Any]]:
+        """Generate OTLP metrics payload for all storage systems (implements abstract method)."""
+        return self.generate_storage_metrics_payload()
+
     def generate_storage_metrics_payload(self) -> Dict[str, List[Any]]:
         """Generate OTLP metrics payload for all storage systems."""
         if not self.storage_systems:
