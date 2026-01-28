@@ -189,6 +189,10 @@ class Telemetry(BaseModel):
 
 class ScenarioConfig(BaseModel):
     title: Optional[str] = Field(None, description="Short summary title of the scenario (max 5-7 words)")
+    cloud_platform: Optional[str] = Field(
+        None,
+        description="K8s platform: 'aws_eks', 'azure_aks', 'gcp_gke', 'openshift', or 'on_prem'. If not specified, randomly selected."
+    )
     services: List[Service]
     databases: Optional[List[Database]] = []
     message_queues: Optional[List[MessageQueue]] = []

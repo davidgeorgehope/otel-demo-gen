@@ -22,6 +22,7 @@ from infra_vm_generator import VMHypervisorGenerator
 from infra_loadbalancer_generator import LoadBalancerGenerator
 from storage_metrics_generator import StorageMetricsGenerator
 from database_metrics_generator import DatabaseMetricsGenerator
+from host_metrics_generator import HostMetricsGenerator
 
 class TelemetryGenerator:
     """
@@ -102,6 +103,13 @@ class TelemetryGenerator:
         # Initialize K8s metrics generator
         self.k8s_generator = K8sMetricsGenerator(config)
 
+        # Initialize host metrics generator (for Elastic Infrastructure UI)
+        # Pass the k8s node data so hosts match the k8s nodes
+        self.host_metrics_generator = HostMetricsGenerator(
+            config,
+            k8s_node_data=self.k8s_generator._k8s_pod_data
+        )
+
         # Initialize infrastructure generators (if infrastructure is configured)
         self.infra_generators: Dict[str, Any] = {}
         self._infra_thread: Optional[threading.Thread] = None
@@ -176,15 +184,16 @@ class TelemetryGenerator:
         """The main loop for the k8s metrics generator thread."""
         # For demo purposes, send K8s metrics more frequently
         k8s_metrics_interval = 10  # Send every 10 seconds instead of 30
-        
+
         logger.info("Kubernetes metrics generation loop started.")
         while not self._stop_event.is_set():
             self.generate_and_send_k8s_metrics()
             self.generate_and_send_k8s_logs()  # Also send K8s logs
-            
+            self.generate_and_send_host_metrics()  # Host metrics for Elastic Infrastructure UI
+
             # Wait for the interval or until stop event is set
             self._stop_event.wait(k8s_metrics_interval)
-        
+
         logger.info("Kubernetes metrics generation loop finished.")
 
     def generate_and_send_k8s_metrics(self):
@@ -192,10 +201,20 @@ class TelemetryGenerator:
         if not self.collector_url:
             logger.warning("OTLP endpoint not configured. Cannot send k8s metrics.")
             return
-            
+
         k8s_metrics_payload = self.k8s_generator.generate_k8s_metrics_payload()
         if k8s_metrics_payload.get("resourceMetrics"):
             self._send_payload(f"{self.collector_url}v1/metrics", k8s_metrics_payload, "k8s-metrics")
+
+    def generate_and_send_host_metrics(self):
+        """Generates and sends host metrics for Elastic Infrastructure UI."""
+        if not self.collector_url:
+            logger.warning("OTLP endpoint not configured. Cannot send host metrics.")
+            return
+
+        host_metrics_payload = self.host_metrics_generator.generate_metrics_payload()
+        if host_metrics_payload.get("resourceMetrics"):
+            self._send_payload(f"{self.collector_url}v1/metrics", host_metrics_payload, "host-metrics")
 
     def generate_and_send_k8s_logs(self, dry_run=False):
         """

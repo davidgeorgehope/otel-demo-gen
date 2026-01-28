@@ -200,6 +200,11 @@ SCENARIO_RESPONSE_SCHEMA: dict[str, Any] = {
     "required": ["title", "services", "telemetry"],
     "properties": {
         "title": {"type": "string", "description": "Short summary title of the scenario (max 5-7 words)"},
+        "cloud_platform": {
+            "type": "string",
+            "enum": ["aws_eks", "azure_aks", "gcp_gke", "openshift", "on_prem"],
+            "description": "K8s platform: aws_eks, azure_aks, gcp_gke, openshift (Red Hat OpenShift), or on_prem (on-premises). Omit for random."
+        },
         "services": {
             "type": "array",
             "minItems": 1,
@@ -435,7 +440,8 @@ REQUIREMENTS
 5. Keep latency objects well-formed and ensure probability defaults to 1.0 if omitted.
 6. Prefer detailed business_data definitions that match the service domain.
 7. Generate a short, descriptive "title" (max 5-7 words) that summarizes the scenario.
-8. When generating infrastructure configuration:
+8. Set "cloud_platform" based on user's platform preference: "aws_eks" for AWS/EKS, "azure_aks" for Azure/AKS, "gcp_gke" for GCP/GKE, "openshift" for Red Hat OpenShift, "on_prem" for on-premises/self-hosted Kubernetes. If not specified, omit the field (will be randomly selected).
+9. When generating infrastructure configuration:
    - Create realistic network topology (core switches, distribution switches, edge routers, firewalls)
    - Map services to VMs and VMs to hypervisor hosts logically
    - Place load balancers in front of frontend/API services

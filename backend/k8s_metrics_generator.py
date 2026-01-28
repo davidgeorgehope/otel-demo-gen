@@ -40,9 +40,9 @@ class K8sMetricsGenerator:
 
     def _initialize_k8s_pod_data(self) -> Dict[str, Dict[str, Any]]:
         """Initialize static k8s pod data for each service with realistic cloud platform."""
-        # Randomly choose cloud platform for more realistic demo
-        cloud_platforms = [
-            {
+        # Cloud/platform configurations
+        cloud_platforms = {
+            'aws_eks': {
                 'provider': 'aws',
                 'platform': 'aws_eks',
                 'region': 'us-east-1',
@@ -52,7 +52,7 @@ class K8sMetricsGenerator:
                 'os_description': 'Amazon Linux 2',
                 'kubelet_version': 'v1.29.10-eks-59bf375'
             },
-            {
+            'gcp_gke': {
                 'provider': 'gcp',
                 'platform': 'gcp_gke',
                 'region': 'us-central1',
@@ -62,7 +62,7 @@ class K8sMetricsGenerator:
                 'os_description': 'Container-Optimized OS',
                 'kubelet_version': 'v1.29.8-gke.1031000'
             },
-            {
+            'azure_aks': {
                 'provider': 'azure',
                 'platform': 'azure_aks',
                 'region': 'eastus',
@@ -71,11 +71,35 @@ class K8sMetricsGenerator:
                 'cluster_suffix': 'aks-cluster',
                 'os_description': 'Ubuntu 22.04.5 LTS',
                 'kubelet_version': 'v1.29.9'
+            },
+            'openshift': {
+                'provider': 'openshift',
+                'platform': 'openshift',
+                'region': 'datacenter-1',
+                'zones': ['rack-1', 'rack-2', 'rack-3'],
+                'node_prefix': 'worker-',
+                'cluster_suffix': 'ocp-cluster',
+                'os_description': 'Red Hat Enterprise Linux CoreOS 415.92',
+                'kubelet_version': 'v1.28.6+openshift'
+            },
+            'on_prem': {
+                'provider': 'on_prem',
+                'platform': 'kubernetes',
+                'region': 'datacenter',
+                'zones': ['zone-a', 'zone-b', 'zone-c'],
+                'node_prefix': 'k8s-worker-',
+                'cluster_suffix': 'k8s-cluster',
+                'os_description': 'Ubuntu 22.04.4 LTS',
+                'kubelet_version': 'v1.29.2'
             }
-        ]
-        
-        # Select random cloud platform for this demo
-        cloud_config = secrets.choice(cloud_platforms)
+        }
+
+        # Use configured cloud platform or select randomly
+        configured_platform = getattr(self.config, 'cloud_platform', None)
+        if configured_platform and configured_platform in cloud_platforms:
+            cloud_config = cloud_platforms[configured_platform]
+        else:
+            cloud_config = secrets.choice(list(cloud_platforms.values()))
         
         cluster_name = f"otel-demo-{cloud_config['cluster_suffix']}-{secrets.token_hex(3)}"
         
@@ -90,9 +114,21 @@ class K8sMetricsGenerator:
                 f"{cloud_config['node_prefix']}{cluster_name}-pool-{i}-{secrets.token_hex(4)}"
                 for i in range(1, 4)
             ]
-        else:  # azure
+        elif cloud_config['provider'] == 'azure':
             node_names = [
                 f"{cloud_config['node_prefix']}agentpool-{secrets.token_hex(4)}-vmss000000{i}"
+                for i in range(3)
+            ]
+        elif cloud_config['provider'] == 'openshift':
+            # OpenShift style: worker-0.ocp-cluster.example.com
+            node_names = [
+                f"{cloud_config['node_prefix']}{i}.{cluster_name}.example.com"
+                for i in range(3)
+            ]
+        else:  # on_prem
+            # On-prem style: k8s-worker-01.cluster.local
+            node_names = [
+                f"{cloud_config['node_prefix']}{i:02d}.{cluster_name}.local"
                 for i in range(3)
             ]
         
