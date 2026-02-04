@@ -329,25 +329,19 @@ class TelemetryGenerator:
             "cloud.availability_zone": pod_data['zone'],
             "deployment.environment": "production",
             "host.name": pod_data['node_name'],
-            "host.architecture": "amd64",  # Elasticsearch exporter maps this to host.architecture 
+            "host.architecture": "amd64",
             "os.type": "linux",
             "os.description": pod_data['os_description'],
             
-            # Container attributes for better ECS mapping
+            # Container attributes
             "container.image.name": f"{service.name}:latest",
-            "container.image.tag": "latest", 
-            "container.image.tags": ["latest", "v1.2.3"],  # Elasticsearch exporter maps this to container.image.tag
+            "container.image.tag": "latest",
             
             # Basic k8s attributes for regular app metrics
             "k8s.cluster.name": pod_data['cluster_name'],
             "k8s.namespace.name": pod_data['namespace'],
             "k8s.pod.name": pod_data['pod_name'],
             "k8s.node.name": pod_data['node_name'],
-            
-            # CRITICAL: Data stream attributes for Elastic routing
-            "data_stream.type": telemetry_type,
-            "data_stream.dataset": "generic", 
-            "data_stream.namespace": "default"
         }
 
     def _generate_telemetry(self):
