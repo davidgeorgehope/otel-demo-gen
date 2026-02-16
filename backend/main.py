@@ -1112,31 +1112,38 @@ async def get_llm_config():
     """
     provider = os.getenv("LLM_PROVIDER", "bedrock").lower()
 
-    if provider != "bedrock":
+    if provider == "gemini":
+        api_key = os.getenv("GEMINI_API_KEY")
+        model_id = os.getenv("GEMINI_MODEL", "gemini-3.0-flash")
         return LLMConfigResponse(
             provider=provider,
-            configured=False,
-            model=None,
+            configured=bool(api_key),
+            model=model_id,
+            details=LLMConfigDetails(model_id=model_id)
+        )
+
+    if provider == "bedrock":
+        aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
+        aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+        aws_region = os.getenv("AWS_REGION", "us-east-1")
+        model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0")
+        return LLMConfigResponse(
+            provider=provider,
+            configured=bool(aws_access_key and aws_secret_key),
+            model=model_id,
             details=LLMConfigDetails(
-                error="Unsupported provider configured. Set LLM_PROVIDER=bedrock and supply AWS credentials."
+                aws_access_key_set=bool(aws_access_key),
+                aws_secret_key_set=bool(aws_secret_key),
+                aws_region=aws_region,
+                model_id=model_id
             )
         )
 
-    aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
-    aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-    aws_region = os.getenv("AWS_REGION", "us-east-1")
-    model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0")
-
     return LLMConfigResponse(
         provider=provider,
-        configured=bool(aws_access_key and aws_secret_key),
-        model=model_id,
-        details=LLMConfigDetails(
-            aws_access_key_set=bool(aws_access_key),
-            aws_secret_key_set=bool(aws_secret_key),
-            aws_region=aws_region,
-            model_id=model_id
-        )
+        configured=False,
+        model=None,
+        details=LLMConfigDetails(error="Unsupported provider: " + provider)
     )
 
 @app.get("/limits", summary="Get current job limits and usage")
