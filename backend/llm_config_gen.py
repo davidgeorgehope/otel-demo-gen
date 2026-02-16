@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from pydantic import ValidationError
 
 from config_schema import ScenarioConfig
+from gemini_provider import _call_gemini
 
 
 load_dotenv()
@@ -473,6 +474,11 @@ EXPECTED JSON SCHEMA:
 {SCENARIO_SCHEMA_TEXT}
 """
 
+def _call_gemini_config(prompt: str) -> str:
+    """Call Gemini API for config generation."""
+    return _call_gemini(prompt, system_prompt=SYSTEM_PROMPT, max_tokens=65536, temperature=0.0)
+
+
 def generate_config_from_description(description: str, *, max_attempts: int = 3) -> str:
     """Generate a JSON configuration from a natural language description using Amazon Bedrock."""
 
@@ -494,7 +500,11 @@ def generate_config_from_description(description: str, *, max_attempts: int = 3)
         else:
             prompt = description if attempt == 0 else _build_retry_prompt(description, last_error, previous_output)
 
-        raw_response = _call_bedrock(prompt)
+        provider = os.getenv("LLM_PROVIDER", "bedrock").lower()
+        if provider == "gemini":
+            raw_response = _call_gemini_config(prompt)
+        else:
+            raw_response = _call_bedrock(prompt)
         normalized = _normalize_json_text(raw_response)
 
         previous_output = normalized

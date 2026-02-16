@@ -42,7 +42,7 @@ APP_VERSION = os.getenv("APP_VERSION", "dev")
 # Make sure the port matches your frontend's dev server port
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], 
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

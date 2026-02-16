@@ -7,17 +7,18 @@ import os
 import json
 from typing import Dict, List, Any, Optional
 from config_schema import ScenarioModification, ScenarioParameter, ContextualPattern
+from gemini_provider import _call_gemini
 
 def generate_scenario_from_description(description: str, context: Optional[Dict[str, Any]] = None) -> ScenarioModification:
     """Uses the configured Bedrock model to generate a scenario modification."""
     provider = os.getenv("LLM_PROVIDER", "bedrock").lower()
 
-    if provider != "bedrock":
-        raise ValueError(
-            f"Unsupported LLM provider '{provider}'. Only 'bedrock' is supported; update LLM_PROVIDER to 'bedrock'."
-        )
-
-    return _generate_scenario_bedrock(description, context)
+    if provider == "gemini":
+        return _generate_scenario_gemini(description, context)
+    elif provider == "bedrock":
+        return _generate_scenario_bedrock(description, context)
+    else:
+        raise ValueError(f"Unsupported LLM provider '{provider}'. Use 'bedrock' or 'gemini'.")
 
 def _build_system_prompt(context: Optional[Dict[str, Any]] = None) -> str:
     """Build the system prompt for scenario generation."""
@@ -116,6 +117,41 @@ def _normalize_json_text(raw_text: str) -> str:
         text = text[start:end + 1]
 
     return text
+
+
+def _generate_scenario_gemini(description: str, context=None) -> ScenarioModification:
+    """Generate scenario using Google Gemini."""
+    prompt = f"{_build_system_prompt(context)}\n\nGenerate a scenario for: {description}"
+    
+    raw = _call_gemini(prompt, max_tokens=2000, temperature=0.3)
+    scenario_json = _normalize_json_text(raw)
+    scenario_data = json.loads(scenario_json)
+    
+    parameters = [
+        ScenarioParameter(key=p["key"], value=p["value"], unit=p.get("unit"))
+        for p in scenario_data["parameters"]
+    ]
+    
+    contextual_patterns = []
+    if "contextual_patterns" in scenario_data:
+        contextual_patterns = [
+            ContextualPattern(
+                attribute_name=cp["attribute_name"],
+                failure_values=cp["failure_values"],
+                normal_values=cp["normal_values"],
+                description=cp["description"]
+            ) for cp in scenario_data["contextual_patterns"]
+        ]
+    
+    return ScenarioModification(
+        type=scenario_data["type"],
+        target_services=scenario_data["target_services"],
+        target_operations=scenario_data.get("target_operations", []),
+        parameters=parameters,
+        contextual_patterns=contextual_patterns,
+        ramp_up_seconds=scenario_data.get("ramp_up_seconds", 0),
+        ramp_down_seconds=scenario_data.get("ramp_down_seconds", 0)
+    )
 
 def _generate_scenario_bedrock(description: str, context: Optional[Dict[str, Any]] = None) -> ScenarioModification:
     """Generate scenario using Amazon Bedrock."""
