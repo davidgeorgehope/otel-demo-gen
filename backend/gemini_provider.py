@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 def _call_gemini(prompt: str, system_prompt: str = "", max_tokens: int = 65536, temperature: float = 0.0) -> str:
     """Call Google Gemini API via REST."""
     api_key = os.getenv("GEMINI_API_KEY")
-    model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     
     if not api_key:
         raise ValueError("GEMINI_API_KEY not set.")
