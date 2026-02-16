@@ -32,7 +32,7 @@ def _call_gemini(prompt: str, system_prompt: str = "", max_tokens: int = 65536, 
         }
     }
     
-    resp = requests.post(url, json=body, timeout=120)
+    resp = requests.post(url, json=body, timeout=300)
     resp.raise_for_status()
     data = resp.json()
     
