@@ -28,7 +28,7 @@ def _call_gemini(prompt: str, system_prompt: str = "", max_tokens: int = 65536, 
         "generationConfig": {
             "temperature": temperature,
             "maxOutputTokens": max_tokens,
-            "responseMimeType": "application/json"
+            
         }
     }
     
